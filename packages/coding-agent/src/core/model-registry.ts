@@ -391,14 +391,14 @@ function readOpenAICodexModelIds(value: unknown): Set<string> {
 	if (!value || typeof value !== "object" || !("models" in value) || !Array.isArray(value.models)) {
 		throw new Error("Invalid OpenAI Codex model catalog");
 	}
-	return new Set(
-		value.models.flatMap((model) => {
-			if (!model || typeof model !== "object" || !("slug" in model) || typeof model.slug !== "string") {
-				return [];
-			}
-			return [model.slug];
-		}),
-	);
+	const modelIds = new Set<string>();
+	for (const model of value.models) {
+		if (!model || typeof model !== "object" || !("slug" in model) || typeof model.slug !== "string") {
+			throw new Error("Invalid OpenAI Codex model catalog");
+		}
+		modelIds.add(model.slug);
+	}
+	return modelIds;
 }
 
 const PRIVATE_PRIME_AUTHORIZATION_CACHE_FILE = "prime-inference-private-models.json";
@@ -978,9 +978,16 @@ export class ModelRegistry {
 			return availableModels.filter((model) => model.provider !== "openai-codex");
 		}
 		const authFingerprint = createHash("sha256").update(auth.apiKey).digest("hex");
+		// An empty successful catalog can be caused by the backend's client-version
+		// gate and does not prove that an authenticated account has no models. Keep
+		// local Codex models executable and let the actual request be authoritative.
+		const filterByCatalog = (ids: Set<string>): Model<Api>[] =>
+			ids.size === 0
+				? availableModels
+				: availableModels.filter((model) => model.provider !== "openai-codex" || ids.has(model.id));
 		const cached = this.openAICodexModelsCache;
 		if (cached?.authFingerprint === authFingerprint && Date.now() - cached.refreshedAt < 300_000) {
-			return availableModels.filter((model) => model.provider !== "openai-codex" || cached.modelIds.has(model.id));
+			return filterByCatalog(cached.modelIds);
 		}
 
 		const accountId = readOpenAICodexAccountId(auth.apiKey);
@@ -1002,12 +1009,10 @@ export class ModelRegistry {
 			}
 			const modelIds = readOpenAICodexModelIds(await response.json());
 			this.openAICodexModelsCache = { authFingerprint, modelIds, refreshedAt: Date.now() };
-			return availableModels.filter((model) => model.provider !== "openai-codex" || modelIds.has(model.id));
+			return filterByCatalog(modelIds);
 		} catch {
 			if (cached?.authFingerprint === authFingerprint && Date.now() - cached.refreshedAt < 300_000) {
-				return availableModels.filter(
-					(model) => model.provider !== "openai-codex" || cached.modelIds.has(model.id),
-				);
+				return filterByCatalog(cached.modelIds);
 			}
 			return availableModels.filter((model) => model.provider !== "openai-codex");
 		}
