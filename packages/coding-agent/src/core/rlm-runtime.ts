@@ -1,5 +1,6 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
+import { isValidThinkingLevel, VALID_THINKING_LEVELS } from "../cli/args.js";
 import type { AgentSession } from "./agent-session.js";
 import type { ToolDefinition } from "./extensions/index.js";
 import type { HostRequestHandler } from "./kernel/index.js";
@@ -16,6 +17,8 @@ export interface RlmSpawnHandle {
 	name: string;
 	session_dir: string;
 	model: string;
+	/** Reasoning level the child actually runs at, after clamping to what its model supports. */
+	thinking: ThinkingLevel;
 }
 
 export type RlmSubagentRegistryStatus = "running" | "completed" | "error";
@@ -89,6 +92,27 @@ export function normalizeRequestedRlmSubagentModel(value: unknown): string | und
 		throw new Error("rlm.run model must not be empty");
 	}
 	return model;
+}
+
+/**
+ * Validate an orchestrator-supplied subagent reasoning level.
+ *
+ * The level is the one the caller asks for, not necessarily the one the child gets: a model that
+ * publishes a narrower ladder clamps it at spawn time, and the resolved level comes back on the
+ * spawn handle.
+ */
+export function normalizeRequestedRlmSubagentThinkingLevel(value: unknown): ThinkingLevel | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (typeof value !== "string") {
+		throw new Error("rlm.run thinking must be a string");
+	}
+	const level = value.trim().toLowerCase();
+	if (!isValidThinkingLevel(level)) {
+		throw new Error(`rlm.run thinking must be one of: ${VALID_THINKING_LEVELS.join(", ")}`);
+	}
+	return level;
 }
 
 /** Create a readable, collision-resistant default name usable as an agent-message selector. */
