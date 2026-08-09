@@ -1,10 +1,25 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
+import { VERSION } from "../../../src/config.js";
 import type { HostRequestHandlers } from "../../../src/core/kernel/index.js";
+import { OPENAI_CODEX_CLIENT_VERSION } from "../../../src/core/model-registry.js";
 import { SessionManager } from "../../../src/core/session-manager.js";
 import { createHarness } from "../harness.js";
 
 const provider = "faux-eng-4649";
+
+/** Order two dotted client versions the way ChatGPT orders `minimal_client_version`. */
+function compareCodexClientVersions(left: string, right: string): number {
+	const leftParts = left.split(".").map(Number);
+	const rightParts = right.split(".").map(Number);
+	for (let index = 0; index < Math.max(leftParts.length, rightParts.length); index++) {
+		const difference = (leftParts[index] ?? 0) - (rightParts[index] ?? 0);
+		if (difference !== 0) {
+			return difference;
+		}
+	}
+	return 0;
+}
 
 function openAICodexToken(accountId: string): string {
 	const payload = Buffer.from(
@@ -130,6 +145,73 @@ describe("ENG-4649 subagent model selection", () => {
 			const discovered = await harness.session.findRlmModels("glm 5.2", 8);
 			expect(discovered.models.map((model) => model.selector)).toContain("prime-inference/internal/glm-5.2-fast");
 			expect(fetchModels).toHaveBeenCalledOnce();
+		} finally {
+			vi.unstubAllGlobals();
+			harness.cleanup();
+		}
+	});
+
+	it("asks ChatGPT for the model catalog with a Codex client version, not the Prime Agent version", async () => {
+		const codexProvider = "openai-codex";
+		const harness = await createHarness({ provider: codexProvider, models: [{ id: "gpt-5.6-luna" }] });
+		const fetchModels = vi.fn(
+			async () =>
+				new Response(JSON.stringify({ models: [{ slug: "gpt-5.6-luna", minimal_client_version: "0.144.0" }] }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				}),
+		);
+		vi.stubGlobal("fetch", fetchModels);
+		try {
+			harness.authStorage.setRuntimeApiKey(codexProvider, openAICodexToken("account-1"));
+			await expect(harness.session.findRlmModels("luna", 8)).resolves.toEqual({
+				models: [
+					{
+						provider: codexProvider,
+						id: "gpt-5.6-luna",
+						name: "gpt-5.6-luna",
+						selector: `${codexProvider}/gpt-5.6-luna`,
+					},
+				],
+			});
+			const requestedUrl = String(fetchModels.mock.calls.at(0)?.at(0));
+			expect(requestedUrl).toContain(`client_version=${OPENAI_CODEX_CLIENT_VERSION}`);
+			expect(requestedUrl).not.toContain(`client_version=${VERSION}`);
+			// The gate is a version comparison against each model's minimal_client_version, so the
+			// value we send has to sort above the versions ChatGPT publishes its models behind.
+			expect(compareCodexClientVersions(OPENAI_CODEX_CLIENT_VERSION, "0.144.0")).toBeGreaterThanOrEqual(0);
+		} finally {
+			vi.unstubAllGlobals();
+			harness.cleanup();
+		}
+	});
+
+	it("keeps the static ChatGPT catalog when discovery returns no models", async () => {
+		const codexProvider = "openai-codex";
+		const harness = await createHarness({ provider: codexProvider, models: [{ id: "gpt-5.6-luna" }] });
+		const fetchModels = vi.fn(
+			async () =>
+				new Response(JSON.stringify({ models: [] }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				}),
+		);
+		vi.stubGlobal("fetch", fetchModels);
+		try {
+			harness.authStorage.setRuntimeApiKey(codexProvider, openAICodexToken("account-1"));
+			await expect(harness.session.findRlmModels("luna", 8)).resolves.toMatchObject({
+				models: [{ selector: `${codexProvider}/gpt-5.6-luna` }],
+			});
+			harness.setResponses([fauxAssistantMessage("codex child answer")]);
+
+			const result = await harness.session.runRlmChild("run on the signed-in ChatGPT model", {
+				model: `${codexProvider}/gpt-5.6-luna`,
+			});
+
+			expect(result.model).toBe(`${codexProvider}/gpt-5.6-luna`);
+			await vi.waitFor(async () => {
+				expect((await harness.session.listRlmSubagents()).subagents[0]?.status).toBe("completed");
+			});
 		} finally {
 			vi.unstubAllGlobals();
 			harness.cleanup();

@@ -27,7 +27,7 @@ import { dirname, join } from "path";
 import { type Static, type TProperties, Type } from "typebox";
 import type { Validator } from "typebox/compile";
 import type { TLocalizedValidationError } from "typebox/error";
-import { getAgentDir, VERSION } from "../config.js";
+import { getAgentDir } from "../config.js";
 import type { AuthSourceToken, AuthStatus, AuthStorage } from "./auth-storage.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "./prime-inference-auth.js";
 import {
@@ -372,6 +372,16 @@ function readOpenAICodexAccountId(token: string): string | undefined {
 	}
 }
 
+/**
+ * ChatGPT gates its Codex model catalog on the `client_version` query parameter: every entry it
+ * returns carries a `minimal_client_version`, and the backend silently drops the models a caller is
+ * too old for, answering `200 {"models":[]}` once nothing is left. That version line belongs to the
+ * Codex client protocol, not to Prime Agent's own release number, so sending our 0.x VERSION
+ * put us below every published gate and hid the entire openai-codex catalog. Bump this when OpenAI
+ * gates a newer model behind a higher client version.
+ */
+export const OPENAI_CODEX_CLIENT_VERSION = "0.146.0";
+
 function openAICodexModelsUrl(baseUrl: string): string {
 	const normalized = baseUrl.replace(/\/+$/, "");
 	let path: string;
@@ -383,7 +393,7 @@ function openAICodexModelsUrl(baseUrl: string): string {
 		path = `${normalized}/codex/models`;
 	}
 	const url = new URL(path);
-	url.searchParams.set("client_version", VERSION);
+	url.searchParams.set("client_version", OPENAI_CODEX_CLIENT_VERSION);
 	return url.toString();
 }
 
@@ -1001,6 +1011,12 @@ export class ModelRegistry {
 				throw new Error(`OpenAI Codex model discovery failed with HTTP ${response.status}`);
 			}
 			const modelIds = readOpenAICodexModelIds(await response.json());
+			// An empty catalog is the shape ChatGPT uses for "this client may see nothing", not
+			// evidence that a signed-in account owns zero models. Fail open on the static catalog so a
+			// future client_version gate degrades to "maybe unusable" instead of hiding every model.
+			if (modelIds.size === 0) {
+				return availableModels;
+			}
 			this.openAICodexModelsCache = { authFingerprint, modelIds, refreshedAt: Date.now() };
 			return availableModels.filter((model) => model.provider !== "openai-codex" || modelIds.has(model.id));
 		} catch {
