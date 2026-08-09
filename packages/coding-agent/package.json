@@ -1,6 +1,6 @@
 {
-	"name": "@earendil-works/pi-coding-agent",
-	"version": "0.7.1",
+	"name": "prime-agent",
+	"version": "0.7.1-fork.b7273887",
 	"description": "Coding agent CLI with IPython-backed tools and session management",
 	"type": "module",
 	"piConfig": {
@@ -8,7 +8,7 @@
 		"configDir": ".prime/agent"
 	},
 	"bin": {
-		"pi": "dist/bundle/cli.js"
+		"prime-agent": "dist/bundle/cli.js"
 	},
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
@@ -48,9 +48,9 @@
 	},
 	"dependencies": {
 		"@agentclientprotocol/sdk": "^1.3.0",
-		"@earendil-works/pi-agent-core": "^0.7.1",
-		"@earendil-works/pi-ai": "^0.7.1",
-		"@earendil-works/pi-tui": "^0.7.1",
+		"@earendil-works/pi-agent-core": "file:/Users/compoooter/coding/prime-agent/local-deps/earendil-works-pi-agent-core-0.7.1.tgz",
+		"@earendil-works/pi-ai": "file:/Users/compoooter/coding/prime-agent/local-deps/earendil-works-pi-ai-0.7.1.tgz",
+		"@earendil-works/pi-tui": "file:/Users/compoooter/coding/prime-agent/local-deps/earendil-works-pi-tui-0.7.1.tgz",
 		"@silvia-odwyer/photon-node": "^0.3.4",
 		"chalk": "^5.5.0",
 		"cli-highlight": "^2.1.11",
@@ -103,7 +103,7 @@
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/PrimeIntellect-ai/prime-agent.git",
+		"url": "git+https://github.com/nicklandshark/prime-agent.git",
 		"directory": "packages/coding-agent"
 	},
 	"engines": {
