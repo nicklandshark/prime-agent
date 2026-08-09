@@ -2308,6 +2308,51 @@ async function generateModels() {
 	];
 	allModels.push(...vertexModels);
 
+	// Cursor cloud agents (https://cursor.com/docs/cloud-agent). Each completion spawns or
+	// resumes a Cursor cloud agent run, so these are logical models, not inference endpoints.
+	// "cloud-agent" omits the model field so the account's server-resolved default applies.
+	// Costs are zero: usage bills to the Cursor plan, not per-token through this API.
+	const CURSOR_BASE_URL = "https://api.cursor.com";
+	const cursorModels: Model<"cursor-cloud-agents">[] = [
+		{
+			id: "cloud-agent",
+			name: "Cursor Cloud Agent",
+			api: "cursor-cloud-agents",
+			provider: "cursor",
+			baseUrl: CURSOR_BASE_URL,
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200000,
+			maxTokens: 8192,
+		},
+		{
+			id: "composer-2.5",
+			name: "Cursor Composer 2.5 (Cloud Agent)",
+			api: "cursor-cloud-agents",
+			provider: "cursor",
+			baseUrl: CURSOR_BASE_URL,
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200000,
+			maxTokens: 8192,
+		},
+		{
+			id: "auto",
+			name: "Cursor Auto (Cloud Agent)",
+			api: "cursor-cloud-agents",
+			provider: "cursor",
+			baseUrl: CURSOR_BASE_URL,
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200000,
+			maxTokens: 8192,
+		},
+	];
+	allModels.push(...cursorModels);
+
 	const primeInferenceModels = await fetchPrimeInferenceModels();
 	allModels.push(...primeInferenceModels);
 

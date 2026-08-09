@@ -12,7 +12,8 @@ export type KnownApi =
 	| "anthropic-messages"
 	| "bedrock-converse-stream"
 	| "google-generative-ai"
-	| "google-vertex";
+	| "google-vertex"
+	| "cursor-cloud-agents";
 
 export type Api = KnownApi | (string & {});
 
@@ -45,6 +46,7 @@ export type KnownProvider =
 	| "kimi-coding"
 	| "cloudflare-workers-ai"
 	| "cloudflare-ai-gateway"
+	| "cursor"
 	| "xiaomi"
 	| "xiaomi-token-plan-cn"
 	| "xiaomi-token-plan-ams"

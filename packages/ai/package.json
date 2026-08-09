@@ -18,6 +18,10 @@
 			"types": "./dist/providers/azure-openai-responses.d.ts",
 			"import": "./dist/providers/azure-openai-responses.js"
 		},
+		"./cursor": {
+			"types": "./dist/providers/cursor/index.d.ts",
+			"import": "./dist/providers/cursor/index.js"
+		},
 		"./google": {
 			"types": "./dist/providers/google.d.ts",
 			"import": "./dist/providers/google.js"

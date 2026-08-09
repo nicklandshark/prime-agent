@@ -68,6 +68,7 @@ prime-agent
 | Hugging Face | `HF_TOKEN` | `huggingface` |
 | Fireworks | `FIREWORKS_API_KEY` | `fireworks` |
 | Kimi For Coding | `KIMI_API_KEY` | `kimi-coding` |
+| Cursor (Cloud Agents) | `CURSOR_API_KEY` | `cursor` |
 | MiniMax | `MINIMAX_API_KEY` | `minimax` |
 | MiniMax (China) | `MINIMAX_CN_API_KEY` | `minimax-cn` |
 | Xiaomi MiMo | `XIAOMI_API_KEY` | `xiaomi` |
@@ -230,6 +231,32 @@ export GOOGLE_CLOUD_LOCATION=us-central1
 ```
 
 Or set `GOOGLE_APPLICATION_CREDENTIALS` to a service account key file.
+
+### Cursor Cloud Agents
+
+The `cursor` provider does not call a model endpoint. Each completion spawns (or resumes) a [Cursor cloud agent](https://cursor.com/docs/cloud-agent) run on a Cursor-hosted VM, and the agent's streamed reply is returned as the completion. No `/login`; the key comes from the environment:
+
+```bash
+export CURSOR_API_KEY=...                              # cursor.com/dashboard/api
+export CURSOR_CLOUD_REPO=https://github.com/org/repo   # repo(s) cloned into the cloud VM
+prime-agent --provider cursor --model cloud-agent
+```
+
+Logical model ids: `cloud-agent` (default; uses the account's server-resolved model), `composer-2.5`, `auto`.
+
+| Variable | Purpose |
+|----------|---------|
+| `CURSOR_API_KEY` | Cursor user or service-account API key (required) |
+| `CURSOR_CLOUD_REPO` | Full GitHub URL of the repo to run agents against (required for new agents) |
+| `CURSOR_CLOUD_REPOS` | Comma-separated alternative to `CURSOR_CLOUD_REPO` for multi-repo agents |
+| `CURSOR_CLOUD_TUNNEL` | `0` disables the tunnel preamble prepended to the first prompt of new agents (default: on) |
+| `TAILSCALE_AUTHKEY` | Forwarded into the cloud VM so the tunnel preamble can run `tailscale up` non-interactively |
+
+Notes:
+
+- New agents are instructed (via the injected preamble, see `CURSOR_TUNNEL_PREAMBLE` in `packages/ai/src/providers/cursor/tunnel-preamble.ts`) to bring up Tailscale in userspace mode (`localhost:1054` HTTP / `localhost:1055` SOCKS5 proxies) plus an OpenSSH fallback, and to report their `tailscale ip4`.
+- Within a session, follow-up turns automatically continue the cloud agent created on the first turn. To resume a specific agent across sessions, pass its `bc-...` id via provider options (`agentId`) or stream metadata (`metadata.cursorAgentId`). The spawned agent id and run id are exposed on each assistant message as `responseId` in the form `bc-.../run-...`; record the `bc-...` id if you need to resume later.
+- The cloud agent runs its own harness with its own tools; the local system prompt and tool definitions are not forwarded.
 
 ## Custom Providers
 

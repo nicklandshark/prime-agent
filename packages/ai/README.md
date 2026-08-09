@@ -1066,6 +1066,7 @@ In Node.js environments, you can set environment variables to avoid passing API 
 | MiniMax | `MINIMAX_API_KEY` |
 | OpenCode Zen / OpenCode Go | `OPENCODE_API_KEY` |
 | Kimi For Coding | `KIMI_API_KEY` |
+| Cursor (Cloud Agents) | `CURSOR_API_KEY` + `CURSOR_CLOUD_REPO` (or `CURSOR_CLOUD_REPOS`). Optional: `CURSOR_CLOUD_TUNNEL`, `TAILSCALE_AUTHKEY` |
 | Xiaomi MiMo (API billing) | `XIAOMI_API_KEY` |
 | Xiaomi MiMo Token Plan (China) | `XIAOMI_TOKEN_PLAN_CN_API_KEY` |
 | Xiaomi MiMo Token Plan (Amsterdam) | `XIAOMI_TOKEN_PLAN_AMS_API_KEY` |

@@ -46,6 +46,7 @@ export const defaultModelPerProvider: Record<KnownProvider, string> = {
 	"kimi-coding": "kimi-for-coding",
 	"cloudflare-workers-ai": "@cf/moonshotai/kimi-k2.6",
 	"cloudflare-ai-gateway": "workers-ai/@cf/moonshotai/kimi-k2.6",
+	cursor: "cloud-agent",
 	xiaomi: "mimo-v2.5-pro",
 	"xiaomi-token-plan-cn": "mimo-v2.5-pro",
 	"xiaomi-token-plan-ams": "mimo-v2.5-pro",

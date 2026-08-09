@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Added a `cursor` provider (`cursor-cloud-agents` API) that runs each completion as a Cursor cloud agent run over the REST v1 API, with logical models `cloud-agent`, `composer-2.5`, and `auto`, repo config via `CURSOR_CLOUD_REPO(S)`, an editable `CURSOR_TUNNEL_PREAMBLE` injected into new agents, and agent/run ids surfaced as `responseId` (`bc-.../run-...`).
+
 ## [0.7.1] - 2026-08-07
 
 ## [0.7.0] - 2026-08-05
