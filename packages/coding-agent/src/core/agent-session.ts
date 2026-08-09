@@ -222,6 +222,7 @@ import {
 	createRlmListSubagentsHostHandler,
 	createRlmRunHostHandler,
 	findRlmModelMatches,
+	normalizeRequestedRlmSubagentFastMode,
 	normalizeRequestedRlmSubagentModel,
 	normalizeRequestedRlmSubagentSessionName,
 	normalizeRequestedRlmSubagentThinkingLevel,
@@ -8927,6 +8928,18 @@ export class AgentSession {
 			.find((entry): entry is SessionMessageEntry => entry.type === "message" && entry.message === message);
 	}
 
+	/**
+	 * Resolve the tier a child runs at.
+	 *
+	 * A requested tier wins over the parent's, and the parent's own preference is deliberately not
+	 * consulted: this reads the effective tier, so a parent whose model cannot run fast inherits
+	 * "default" downward and has to ask explicitly to put a fast-capable child on the fast tier.
+	 */
+	private _resolveRlmSubagentServiceTier(model: Model<any>, requested: ServiceTier | undefined): ServiceTier {
+		const tier = requested ?? this.serviceTier;
+		return tier === "priority" && !supportsFastMode(model) ? "default" : tier;
+	}
+
 	private _createRlmSubagentRuntimeOptions(options: {
 		id: string;
 		prompt: string;
@@ -8936,6 +8949,8 @@ export class AgentSession {
 		model: Model<any>;
 		/** Explicit per-child reasoning level; the parent's level is inherited when absent. */
 		thinkingLevel?: ThinkingLevel;
+		/** Explicit per-child service tier; the parent's tier is inherited when absent. */
+		serviceTier?: ServiceTier;
 	}): CreateRlmSubagentRuntimeOptions {
 		return {
 			parentSession: this,
@@ -8946,8 +8961,9 @@ export class AgentSession {
 			sessionDir: options.sessionDir,
 			model: options.model,
 			thinkingLevel: clampThinkingLevel(options.model, options.thinkingLevel ?? this.thinkingLevel) as ThinkingLevel,
-			serviceTier:
-				this.serviceTier === "priority" && !supportsFastMode(options.model) ? "default" : this.serviceTier,
+			// Fast mode is judged against the CHILD's model, so a parent that cannot run fast at all
+			// (any non-ChatGPT model) can still hand the fast tier to a ChatGPT child.
+			serviceTier: this._resolveRlmSubagentServiceTier(options.model, options.serviceTier),
 			scopedModels: [...this._scopedModels],
 			activeToolNames: this.getActiveToolNames(),
 			allowedToolNames: this._allowedToolNames ? [...this._allowedToolNames] : undefined,
@@ -9609,7 +9625,7 @@ export class AgentSession {
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
 	): Promise<RlmSpawnHandle> {
-		const { name: rawName, model: rawModel, thinking: rawThinking, ...unsupported } = kwargs;
+		const { name: rawName, model: rawModel, thinking: rawThinking, fast: rawFast, ...unsupported } = kwargs;
 		const unsupportedKwargs = Object.keys(unsupported);
 		if (unsupportedKwargs.length > 0) {
 			throw new Error(`Unsupported rlm.run kwargs: ${unsupportedKwargs.sort().join(", ")}`);
@@ -9617,6 +9633,7 @@ export class AgentSession {
 		const requestedSessionName = normalizeRequestedRlmSubagentSessionName(rawName);
 		const requestedModel = normalizeRequestedRlmSubagentModel(rawModel);
 		const requestedThinkingLevel = normalizeRequestedRlmSubagentThinkingLevel(rawThinking);
+		const requestedServiceTier = normalizeRequestedRlmSubagentFastMode(rawFast);
 		if (requestedSessionName) assertDirectAgentMessageTarget(requestedSessionName);
 		if (this._rlmDepth >= this._rlmMaxDepth) {
 			throw new Error(
@@ -9707,6 +9724,7 @@ export class AgentSession {
 				sessionDir: childSessionDir,
 				model: modelSelection.model,
 				thinkingLevel: requestedThinkingLevel,
+				serviceTier: requestedServiceTier,
 			}),
 			onSessionPublished: publishChildSession,
 		};
@@ -9955,6 +9973,7 @@ export class AgentSession {
 			session_dir: childSessionDir,
 			model: `${modelSelection.model.provider}/${modelSelection.model.id}`,
 			thinking: subagentOptions.thinkingLevel,
+			fast: subagentOptions.serviceTier === "priority",
 		};
 	}
 

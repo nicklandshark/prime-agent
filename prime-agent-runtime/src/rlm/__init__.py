@@ -33,6 +33,9 @@ class RLMSpawnHandle:
     #: Reasoning level the child runs at, after the host clamps the request to what its model
     #: supports. Empty when talking to a host that predates per-child reasoning levels.
     thinking: str = ""
+    #: Whether the child runs on the fast service tier, after the host clamps the request to what
+    #: its model supports. False when talking to a host that predates per-child fast mode.
+    fast: bool = False
 
 
 @dataclass(frozen=True)
@@ -77,12 +80,14 @@ def _spawn_handle_from_payload(payload: Any) -> RLMSpawnHandle:
     if not all(isinstance(value, str) and value for value in (child_id, name, session_dir, model)):
         raise RuntimeError("rlm.run returned an invalid spawn handle")
     thinking = payload.get("thinking")
+    fast = payload.get("fast")
     return RLMSpawnHandle(
         rlm_child_id=child_id,
         name=name,
         session_dir=Path(session_dir),
         model=model,
         thinking=thinking if isinstance(thinking, str) else "",
+        fast=fast is True,
     )
 
 
@@ -151,6 +156,8 @@ async def run(prompt: str, **kwargs: Any) -> RLMSpawnHandle:
     ``model`` selects a child with an exact ``provider/model`` selector.
     ``thinking`` sets the child's reasoning level (off, minimal, low, medium, high, xhigh, max)
     instead of inheriting the parent's; the resolved level is on the returned handle.
+    ``fast`` opts the child into or out of the fast service tier instead of inheriting it; the
+    resolved value is on the returned handle.
     """
     if not isinstance(prompt, str):
         raise TypeError(f"prompt must be str, got {type(prompt).__name__}")

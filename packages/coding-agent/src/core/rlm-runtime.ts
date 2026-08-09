@@ -19,6 +19,8 @@ export interface RlmSpawnHandle {
 	model: string;
 	/** Reasoning level the child actually runs at, after clamping to what its model supports. */
 	thinking: ThinkingLevel;
+	/** Whether the child actually runs on the fast tier, after clamping to what its model supports. */
+	fast: boolean;
 }
 
 export type RlmSubagentRegistryStatus = "running" | "completed" | "error";
@@ -113,6 +115,24 @@ export function normalizeRequestedRlmSubagentThinkingLevel(value: unknown): Thin
 		throw new Error(`rlm.run thinking must be one of: ${VALID_THINKING_LEVELS.join(", ")}`);
 	}
 	return level;
+}
+
+/**
+ * Validate an orchestrator-supplied fast-tier request and map it onto a service tier.
+ *
+ * Three states, all meaningful: omitted inherits the parent's tier, `True` asks for the fast tier
+ * even from a parent that is not on it, and `False` keeps a child off the fast tier its parent is
+ * paying for. The service tier is the internal vocabulary, but only "priority" is reachable from
+ * the CLI, the TUI and settings, so a boolean says exactly as much and reads better at a spawn.
+ */
+export function normalizeRequestedRlmSubagentFastMode(value: unknown): ServiceTier | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (typeof value !== "boolean") {
+		throw new Error("rlm.run fast must be a boolean");
+	}
+	return value ? "priority" : "default";
 }
 
 /** Create a readable, collision-resistant default name usable as an agent-message selector. */

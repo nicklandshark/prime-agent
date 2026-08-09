@@ -146,14 +146,18 @@ await rlm("subtask")
 await rlm.run("subtask")
 ```
 
-`RLMSpawnHandle` contains `rlm_child_id`, `name`, `session_dir`, and `model`. It confirms admission only and never contains the child's answer.
+`RLMSpawnHandle` contains `rlm_child_id`, `name`, `session_dir`, `model`, `thinking`, and `fast`. It confirms admission only and never contains the child's answer.
 
 Supported `rlm.run` options are:
 
-- `name`: a unique readable child session name; and
-- `model`: an exact `provider/model` selector from `rlm.find_models()`.
+- `name`: a unique readable child session name;
+- `model`: an exact `provider/model` selector from `rlm.find_models()`;
+- `thinking`: a reasoning level of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`; and
+- `fast`: a boolean opting the child into or out of the fast service tier.
 
-Unknown options fail instead of being ignored. Model search is bounded to active, non-expired credentials. If an exact selection is unavailable or fails auth preflight, spawn fails instead of silently falling back to another model. A child otherwise inherits the parent model.
+Unknown options fail instead of being ignored. Model search is bounded to active, non-expired credentials. If an exact selection is unavailable or fails auth preflight, spawn fails instead of silently falling back to another model. A child otherwise inherits the parent model, reasoning level, and service tier.
+
+`thinking` and `fast` describe a request, not a guarantee. Both are resolved against the child's own model — a reasoning level clamps to the ladder that model publishes, and fast mode is a ChatGPT (`openai-codex`) capability, so a fast request for any other provider resolves back to the normal tier. Because the clamp is judged against the child's model rather than the parent's, a parent that cannot run fast at all can still spawn a fast ChatGPT child. The handle reports what the child actually got, so read `handle.thinking` and `handle.fast` rather than assuming the request was honored.
 
 ## Child Execution
 
