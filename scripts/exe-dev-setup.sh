@@ -42,6 +42,7 @@ if command -v node >/dev/null 2>&1; then
   if [ "$1" -gt "$NODE_MAJOR" ] || { [ "$1" -eq "$NODE_MAJOR" ] && [ "$2" -ge 8 ]; }; then
     need_node=0
     log "node $(node --version) already present"
+    [ "$1" -eq "$NODE_MAJOR" ] || warn "node major != ${NODE_MAJOR} — only ${NODE_MAJOR}.x is tested (zeromq ships no Node-24 prebuild; a source build may fail)"
   else
     warn "node $(node --version) present but <22.8 — installing ${NODE_MAJOR}.x"
   fi
@@ -75,8 +76,8 @@ import json,sys
 d=json.load(sys.stdin)
 for a in d["assets"]:
     n=a["name"]
-    if n.startswith("prime-agent-") and n.endswith(".tgz")
-       and not any(n.startswith(p) for p in ("prime-agent-ai-","prime-agent-core-","prime-agent-tui-")):
+    if (n.startswith("prime-agent-") and n.endswith(".tgz")
+        and not any(n.startswith(p) for p in ("prime-agent-ai-","prime-agent-core-","prime-agent-tui-"))):
         print(a["browser_download_url"]); break
 ')"
 [ -n "$tarball_url" ] || { echo "could not resolve latest release tarball" >&2; exit 1; }
@@ -137,5 +138,5 @@ for v in WAFER_API_KEY OPENROUTER_API_KEY; do
 done
 [ -f "$HOME/.config/steel/config.json" ] || warn "optional: ~/.config/steel/config.json (Steel auth) not present"
 
-log "Done. prime-agent $(prime-agent --version 2>/dev/null || echo 'NOT ON PATH — open a new shell')"
+log "Done. prime-agent $(prime-agent --version </dev/null 2>/dev/null || echo 'NOT ON PATH — open a new shell')"
 [ "$missing" -eq 0 ] && log "No required secrets missing." || true
