@@ -29,6 +29,7 @@ set -euo pipefail
 FORK_REPO="nicklandshark/prime-agent"
 ENV_REPO="nicklandshark/prime-agent-env"
 EXT_REPO="nicklandshark/claude-better-oauth"
+WEB_REPO="nicklandshark/cursor-web"
 NODE_MAJOR="22"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -121,6 +122,17 @@ if [ "$have_auth" -eq 1 ]; then
   fi
   mkdir -p "$HOME/.prime/agent/extensions"
   ln -sfn "$HOME/coding/claude-better-oauth" "$HOME/.prime/agent/extensions/claude-better-oauth"
+
+  # cursor-web (powers the websearch/webfetch skills) — private, Rust build
+  log "Building cursor-web"
+  if [ ! -d "$HOME/coding/cursor-web" ]; then
+    git clone --quiet "${git_auth_prefix}${WEB_REPO}.git" "$HOME/coding/cursor-web"
+  fi
+  if ! command -v cargo >/dev/null 2>&1; then
+    curl -fsSL https://sh.rustup.rs | sh -s -- -y --quiet
+  fi
+  sudo apt-get install -y libsqlite3-dev >/dev/null
+  "$HOME/.cargo/bin/cargo" install --path "$HOME/coding/cursor-web" --quiet
 else
   warn "No GH_TOKEN / gh auth — skipped companion env repo (${ENV_REPO}) and extension (${EXT_REPO})."
   warn "Re-run with GH_TOKEN set, or apply manually per ${ENV_REPO} README."
@@ -137,6 +149,7 @@ for v in WAFER_API_KEY OPENROUTER_API_KEY; do
   fi
 done
 [ -f "$HOME/.config/steel/config.json" ] || warn "optional: ~/.config/steel/config.json (Steel auth) not present"
+grep -q "^export CURSOR_TOKEN=" "$HOME/.bashrc" 2>/dev/null || warn "missing CURSOR_TOKEN (Cursor IDE session token — needed by the websearch/webfetch skills' cursor-web binary)"
 
 log "Done. prime-agent $(prime-agent --version </dev/null 2>/dev/null || echo 'NOT ON PATH — open a new shell')"
 [ "$missing" -eq 0 ] && log "No required secrets missing." || true
