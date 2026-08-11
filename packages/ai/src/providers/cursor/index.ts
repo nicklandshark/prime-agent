@@ -33,7 +33,13 @@ const MAX_PROMPT_IMAGES = 5;
 export interface CursorOptions extends StreamOptions {
 	/** Existing cloud agent id (`bc-...`) to send this turn to as a follow-up run. */
 	agentId?: string;
-	/** GitHub repo URLs cloned into the cloud VM when creating a new agent. Overrides CURSOR_CLOUD_REPO(S). */
+	/**
+	 * Named cloud environment to create the new agent in (`env: {type: "cloud", name}`).
+	 * The environment has its repos baked in, so it is mutually exclusive with `repos`:
+	 * when set, `repos` is dropped.
+	 */
+	environment?: string;
+	/** GitHub repo URLs cloned into the cloud VM when creating a new agent. Overrides CURSOR_CLOUD_REPO(S). Ignored when `environment` is set. */
 	repos?: string[];
 	/** Prepend CURSOR_TUNNEL_PREAMBLE to the first prompt of newly created agents. Default: true (CURSOR_CLOUD_TUNNEL=0 disables). */
 	tunnel?: boolean;
@@ -110,14 +116,22 @@ export const streamCursor: StreamFunction<"cursor-cloud-agents", CursorOptions> 
 			}
 
 			if (!agentId) {
-				const repos = resolveRepos(options);
-				if (repos.length === 0) {
+				const environment = resolveEnvironment(options);
+				// A named cloud environment has its repos baked in, so it is mutually
+				// exclusive with repos: environment wins and repos are dropped.
+				const repos = environment ? [] : resolveRepos(options);
+				if (!environment && repos.length === 0) {
 					throw new Error(
 						"No repository configured for Cursor cloud agents. Set CURSOR_CLOUD_REPO to a full GitHub URL " +
-							"(e.g. https://github.com/org/repo) or CURSOR_CLOUD_REPOS (comma-separated), or pass repos via provider options.",
+							"(e.g. https://github.com/org/repo) or CURSOR_CLOUD_REPOS (comma-separated), pass repos via " +
+							"provider options, or target a named cloud environment via the environment option.",
 					);
 				}
-				const created = await client.createAgent(userMessage, repos, resolveTunnelEnabled(options));
+				// A named cloud environment is already provisioned, so the tunnel preamble is
+				// unnecessary there — default tunnel off when environment is set unless the
+				// caller explicitly opts back in.
+				const tunnelEnabled = options?.tunnel ?? (environment ? false : resolveTunnelEnabled(options));
+				const created = await client.createAgent(userMessage, repos, tunnelEnabled, environment);
 				agentId = created.agentId;
 				runId = created.runId;
 			}
@@ -178,6 +192,7 @@ export const streamSimpleCursor: StreamFunction<"cursor-cloud-agents", SimpleStr
 	return streamCursor(model, context, {
 		...buildBaseOptions(model, options),
 		agentId: cursorOptions?.agentId,
+		environment: cursorOptions?.environment,
 		repos: cursorOptions?.repos,
 		tunnel: cursorOptions?.tunnel,
 		tailscaleAuthKey: cursorOptions?.tailscaleAuthKey,
@@ -241,6 +256,11 @@ function resolveAgentId(options?: CursorOptions): string | undefined {
 	return undefined;
 }
 
+function resolveEnvironment(options?: CursorOptions): string | undefined {
+	const environment = options?.environment?.trim();
+	return environment ? environment : undefined;
+}
+
 function resolveRepos(options?: CursorOptions): string[] {
 	if (options?.repos?.length) return options.repos;
 	const multi = process.env.CURSOR_CLOUD_REPOS?.split(",")
@@ -284,14 +304,21 @@ class CursorCloudClient {
 		message: CursorUserMessage,
 		repos: string[],
 		tunnel: boolean,
+		environment?: string,
 	): Promise<{ agentId: string; runId: string }> {
 		const promptText = tunnel ? `${CURSOR_TUNNEL_PREAMBLE}\n${message.text}` : message.text;
 		const body: Record<string, unknown> = {
 			prompt: buildPrompt(promptText, message.images),
-			repos: repos.map((url) => ({ url })),
 			autoCreatePR: false,
 			skipReviewerRequest: true,
 		};
+		// env and repos are mutually exclusive: a named cloud environment already
+		// has its repos baked in, so repos are only sent for unnamed environments.
+		if (environment) {
+			body.env = { type: "cloud", name: environment };
+		} else {
+			body.repos = repos.map((url) => ({ url }));
+		}
 		// "cloud-agent" is the logical id for the account's server-resolved default model.
 		if (this.model.id !== "cloud-agent") {
 			body.model = { id: this.model.id };
