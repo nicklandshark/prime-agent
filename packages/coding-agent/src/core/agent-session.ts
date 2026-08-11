@@ -123,6 +123,8 @@ import {
 } from "./context-tree.js";
 import type { AgentCronJob, AgentRlmHeartbeatController, AgentRlmHeartbeatStatusUpdate } from "./cron-jobs.js";
 import { normalizeHeartbeatDeliveryMode } from "./cron-jobs.js";
+import { createCursorDeleteTool } from "./cursor-agent/delete-tool.js";
+import { createCursorExecHandlers } from "./cursor-agent/exec-bridge.js";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.js";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.js";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.js";
@@ -1361,6 +1363,17 @@ export class AgentSession {
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
+		const cursorDeleteTool = createCursorDeleteTool(this._cwd);
+		this.agent.setExternalTool(cursorDeleteTool);
+		this.agent.setCursorAgentBridge(
+			createCursorExecHandlers({
+				getTools: () => [...this.agent.state.tools, cursorDeleteTool],
+				emitEvent: (event) => this.agent.emitExternalEvent(event),
+				executeTool: (toolName, toolCallId, args, onUpdate, skipBeforeToolCall, signal) =>
+					this.agent.executeExternalTool(toolName, toolCallId, args, onUpdate, skipBeforeToolCall, signal),
+				approveTool: (toolName, toolCallId, args) => this.agent.approveExternalTool(toolName, toolCallId, args),
+			}),
+		);
 	}
 
 	/**

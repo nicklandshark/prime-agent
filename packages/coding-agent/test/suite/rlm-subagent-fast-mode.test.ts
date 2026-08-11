@@ -122,10 +122,11 @@ describe("RLM subagent fast mode", () => {
 		}
 	});
 
-	it("accepts fast through the kernel host handler and rejects non-booleans", async () => {
+	it("accepts true and null through the kernel host handler and rejects other types", async () => {
 		const harness = await createHarness(codexModels);
 		try {
-			harness.setResponses([fauxAssistantMessage("kernel answer")]);
+			harness.session.setServiceTier("priority");
+			harness.setResponses([fauxAssistantMessage("kernel answer"), fauxAssistantMessage("inherited answer")]);
 			const handlers = (
 				harness.session as unknown as { _createKernelHostHandlers(): HostRequestHandlers }
 			)._createKernelHostHandlers();
@@ -137,8 +138,13 @@ describe("RLM subagent fast mode", () => {
 			};
 			expect(handle.fast).toBe(true);
 
+			const inherited = (await run({ prompt: "inherit with explicit null", kwargs: { fast: null } })) as {
+				fast: boolean;
+			};
+			expect(inherited.fast).toBe(true);
+
 			await expect(run({ prompt: "bad type", kwargs: { fast: "priority" } })).rejects.toThrow(
-				"rlm.run fast must be a boolean",
+				"rlm.run fast must be a boolean or null",
 			);
 			await expect(run({ prompt: "bad kwarg", kwargs: { service_tier: "priority" } })).rejects.toThrow(
 				"Unsupported rlm.run kwargs: service_tier",

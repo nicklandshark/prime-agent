@@ -126,11 +126,11 @@ export function normalizeRequestedRlmSubagentThinkingLevel(value: unknown): Thin
  * the CLI, the TUI and settings, so a boolean says exactly as much and reads better at a spawn.
  */
 export function normalizeRequestedRlmSubagentFastMode(value: unknown): ServiceTier | undefined {
-	if (value === undefined) {
+	if (value === undefined || value === null) {
 		return undefined;
 	}
 	if (typeof value !== "boolean") {
-		throw new Error("rlm.run fast must be a boolean");
+		throw new Error("rlm.run fast must be a boolean or null");
 	}
 	return value ? "priority" : "default";
 }

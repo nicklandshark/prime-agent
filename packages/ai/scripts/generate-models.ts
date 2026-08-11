@@ -323,7 +323,10 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		mergeThinkingLevelMap(model, DEEPSEEK_V4_THINKING_LEVEL_MAP);
 	}
 	const kimiK3Id = model.id.toLowerCase();
-	if (/^k3(-|$)/.test(kimiK3Id) || /(^|\/)kimi-k3(-|$)/.test(kimiK3Id)) {
+	if (
+		model.provider !== "cursor-agent" &&
+		(/^k3(-|$)/.test(kimiK3Id) || /(^|\/)kimi-k3(-|$)/.test(kimiK3Id))
+	) {
 		mergeThinkingLevelMap(model, KIMI_K3_THINKING_LEVEL_MAP);
 	}
 	if (isGoogleThinkingApi(model) && isGemini3ProModel(model.id)) {
@@ -2308,6 +2311,59 @@ async function generateModels() {
 	];
 	allModels.push(...vertexModels);
 
+	// Cursor Subscription AgentService models. These logical entries collapse Cursor's
+	// credential-gated reasoning/fast sibling IDs; live discovery fail-closes unavailable routes.
+	const CURSOR_AGENT_BASE_URL = "https://api2.cursor.sh";
+	const cursorAgentModels: Model<"cursor-agent">[] = [
+		{
+			id: "cursor-grok-4.5-high",
+			name: "Cursor Grok 4.5",
+			api: "cursor-agent",
+			provider: "cursor-agent",
+			baseUrl: CURSOR_AGENT_BASE_URL,
+			reasoning: true,
+			thinkingLevelMap: {
+				off: null,
+				minimal: null,
+				low: null,
+				medium: "cursor-grok-4.5-low",
+				high: "cursor-grok-4.5-medium",
+				xhigh: "cursor-grok-4.5-high",
+				max: null,
+			},
+			input: ["text"],
+			// Published model-pool rates (USD/M tokens), not Cursor plan or invoice pricing.
+			cost: { input: 2, output: 6, cacheRead: 0.2, cacheWrite: 0 },
+			contextWindow: 200000,
+			maxTokens: 64000,
+			featured: true,
+		},
+		{
+			id: "kimi-k3-max",
+			name: "Cursor Kimi K3",
+			api: "cursor-agent",
+			provider: "cursor-agent",
+			baseUrl: CURSOR_AGENT_BASE_URL,
+			reasoning: true,
+			thinkingLevelMap: {
+				off: null,
+				minimal: null,
+				low: "kimi-k3-low",
+				medium: null,
+				high: "kimi-k3-high",
+				xhigh: null,
+				max: "kimi-k3-max",
+			},
+			input: ["text"],
+			// Published model-pool rates (USD/M tokens), not Cursor plan or invoice pricing.
+			cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 },
+			contextWindow: 200000,
+			maxTokens: 8192,
+			featured: true,
+		},
+	];
+	allModels.push(...cursorAgentModels);
+
 	// Cursor cloud agents (https://cursor.com/docs/cloud-agent). Each completion spawns or
 	// resumes a Cursor cloud agent run, so these are logical models, not inference endpoints.
 	// "cloud-agent" omits the model field so the account's server-resolved default applies.
@@ -2421,6 +2477,9 @@ export const MODELS = {
 				output += `\t\t\tthinkingLevelMap: ${JSON.stringify(model.thinkingLevelMap)},\n`;
 			}
 			output += `\t\t\tinput: [${model.input.map(i => `"${i}"`).join(", ")}],\n`;
+			if (model.provider === "cursor-agent") {
+				output += `\t\t\t// Published model-pool rates (USD/M tokens), not Cursor plan or invoice pricing.\n`;
+			}
 			output += `\t\t\tcost: {\n`;
 			output += `\t\t\t\tinput: ${model.cost.input},\n`;
 			output += `\t\t\t\toutput: ${model.cost.output},\n`;

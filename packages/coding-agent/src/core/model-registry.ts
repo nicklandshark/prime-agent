@@ -20,6 +20,7 @@ import {
 	resetApiProviders,
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
+import { fetchCursorAgentModelIds, hasCursorAgentLogicalModelRoutes } from "@earendil-works/pi-ai/cursor-agent";
 import { registerBuiltinMcpOAuthProviders } from "@earendil-works/pi-ai/mcp";
 import { registerOAuthProvider, resetOAuthProviders } from "@earendil-works/pi-ai/oauth";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "fs";
@@ -445,6 +446,7 @@ export class ModelRegistry {
 	private authorizedPrivatePrimeInferenceTeamId: string | undefined;
 	private explicitPrivatePrimeInferenceModelIds = new Set<string>();
 	private openAICodexModelsCache: { authFingerprint: string; modelIds: Set<string>; refreshedAt: number } | undefined;
+	private cursorAgentModelsCache: { authFingerprint: string; modelIds: Set<string>; refreshedAt: number } | undefined;
 	private backgroundPrivatePrimeAuthorization: { fingerprint: string; promise: Promise<void> } | undefined;
 	private loadError: string | undefined = undefined;
 
@@ -977,25 +979,62 @@ export class ModelRegistry {
 
 	async getExecutableModels(): Promise<Model<Api>[]> {
 		await this.refreshPrivatePrimeInferenceAuthorization();
-		const availableModels = this.getAvailable();
-		const codexModels = availableModels.filter((model) => model.provider === "openai-codex");
+		let executableModels = this.getAvailable();
+
+		const cursorModels = executableModels.filter((model) => model.provider === "cursor-agent");
+		if (cursorModels.length > 0) {
+			const auth = await this.getApiKeyAndHeaders(cursorModels[0]!);
+			if (!auth.ok || !auth.apiKey) {
+				executableModels = executableModels.filter((model) => model.provider !== "cursor-agent");
+			} else {
+				const authFingerprint = createHash("sha256").update(auth.apiKey).digest("hex");
+				const cached = this.cursorAgentModelsCache;
+				let modelIds: Set<string> | undefined;
+				if (cached?.authFingerprint === authFingerprint && Date.now() - cached.refreshedAt < 300_000) {
+					modelIds = cached.modelIds;
+				} else {
+					try {
+						const discoveredModelIds = await fetchCursorAgentModelIds(auth.apiKey, {
+							baseUrl: cursorModels[0]!.baseUrl,
+						});
+						modelIds = discoveredModelIds;
+						this.cursorAgentModelsCache = {
+							authFingerprint,
+							modelIds: discoveredModelIds,
+							refreshedAt: Date.now(),
+						};
+					} catch {
+						if (cached?.authFingerprint === authFingerprint && Date.now() - cached.refreshedAt < 300_000) {
+							modelIds = cached.modelIds;
+						}
+					}
+				}
+				executableModels = executableModels.filter(
+					(model) =>
+						model.provider !== "cursor-agent" ||
+						(modelIds !== undefined && hasCursorAgentLogicalModelRoutes(model.id, modelIds)),
+				);
+			}
+		}
+
+		const codexModels = executableModels.filter((model) => model.provider === "openai-codex");
 		if (codexModels.length === 0) {
-			return availableModels;
+			return executableModels;
 		}
 
 		const auth = await this.getApiKeyAndHeaders(codexModels[0]!);
 		if (!auth.ok || !auth.apiKey) {
-			return availableModels.filter((model) => model.provider !== "openai-codex");
+			return executableModels.filter((model) => model.provider !== "openai-codex");
 		}
 		const authFingerprint = createHash("sha256").update(auth.apiKey).digest("hex");
 		const cached = this.openAICodexModelsCache;
 		if (cached?.authFingerprint === authFingerprint && Date.now() - cached.refreshedAt < 300_000) {
-			return availableModels.filter((model) => model.provider !== "openai-codex" || cached.modelIds.has(model.id));
+			return executableModels.filter((model) => model.provider !== "openai-codex" || cached.modelIds.has(model.id));
 		}
 
 		const accountId = readOpenAICodexAccountId(auth.apiKey);
 		if (!accountId) {
-			return availableModels.filter((model) => model.provider !== "openai-codex");
+			return executableModels.filter((model) => model.provider !== "openai-codex");
 		}
 		try {
 			const response = await fetch(openAICodexModelsUrl(codexModels[0]!.baseUrl), {
@@ -1015,17 +1054,17 @@ export class ModelRegistry {
 			// evidence that a signed-in account owns zero models. Fail open on the static catalog so a
 			// future client_version gate degrades to "maybe unusable" instead of hiding every model.
 			if (modelIds.size === 0) {
-				return availableModels;
+				return executableModels;
 			}
 			this.openAICodexModelsCache = { authFingerprint, modelIds, refreshedAt: Date.now() };
-			return availableModels.filter((model) => model.provider !== "openai-codex" || modelIds.has(model.id));
+			return executableModels.filter((model) => model.provider !== "openai-codex" || modelIds.has(model.id));
 		} catch {
 			if (cached?.authFingerprint === authFingerprint && Date.now() - cached.refreshedAt < 300_000) {
-				return availableModels.filter(
+				return executableModels.filter(
 					(model) => model.provider !== "openai-codex" || cached.modelIds.has(model.id),
 				);
 			}
-			return availableModels.filter((model) => model.provider !== "openai-codex");
+			return executableModels.filter((model) => model.provider !== "openai-codex");
 		}
 	}
 

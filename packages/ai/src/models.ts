@@ -37,6 +37,9 @@ export function getModels<TProvider extends KnownProvider>(
 }
 
 export function supportsFastMode<TApi extends Api>(model: Model<TApi>): boolean {
+	if (model.provider === "cursor-agent" && model.api === "cursor-agent" && model.id === "cursor-grok-4.5-high") {
+		return true;
+	}
 	return (
 		model.provider === "openai-codex" &&
 		model.api === "openai-codex-responses" &&
