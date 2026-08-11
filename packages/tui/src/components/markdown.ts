@@ -1,5 +1,5 @@
 import { Marked, type Token, Tokenizer, type TokenizerExtension, type Tokens } from "marked";
-import { latexToUnicode } from "../latex.js";
+import { renderLatex } from "../latex.js";
 import {
 	extractTableCellSelectionRegions,
 	markTableCell,
@@ -30,85 +30,128 @@ class StrictStrikethroughTokenizer extends Tokenizer {
 	}
 }
 
-interface MathToken {
+interface MathToken extends Tokens.Generic {
 	type: "blockMath" | "inlineMath";
-	raw: string;
 	/** Raw LaTeX source without the delimiters. */
 	text: string;
+	/** Incomplete streamed delimiter; preserve it verbatim until it closes. */
+	pending?: boolean;
 }
 
-// Math must tokenize before marked's escape/emphasis handling, or \[ collapses
-// to [ and underscores inside formulas become italics. Unterminated delimiters
-// never match, so partially streamed math stays plain text until the closing
-// delimiter arrives. Leading indentation is consumed because models often
-// indent display math, which would otherwise lex as an indented code block.
-const BLOCK_MATH_REGEX = /^[ \t]*(?:\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\])[ \t]*(?:\n|$)/;
-
-function minIndex(a: number, b: number): number | undefined {
-	if (a === -1) {
-		return b === -1 ? undefined : b;
+function isEscaped(source: string, index: number): boolean {
+	let backslashes = 0;
+	for (let position = index - 1; position >= 0 && source[position] === "\\"; position--) {
+		backslashes++;
 	}
-	return b === -1 ? a : Math.min(a, b);
+	return backslashes % 2 === 1;
 }
 
-const blockMathExtension: TokenizerExtension = {
-	name: "blockMath",
-	level: "block",
-	// start() runs on every paragraph continuation; scanning only the current
-	// paragraph keeps it cheap, and later math is caught at its block boundary.
-	start: (src: string) => {
-		const paragraphEnd = src.indexOf("\n\n");
-		const window = paragraphEnd === -1 ? src : src.slice(0, paragraphEnd);
-		return minIndex(window.indexOf("$$"), window.indexOf("\\["));
-	},
-	tokenizer(src: string): Tokens.Generic | undefined {
-		const first = src.charCodeAt(0);
-		if (first !== 0x24 /* $ */ && first !== 0x5c /* \ */ && first !== 0x20 /* space */ && first !== 0x09 /* tab */) {
-			return undefined;
-		}
-		const match = BLOCK_MATH_REGEX.exec(src);
-		if (!match) {
-			return undefined;
-		}
-		const token: MathToken = { type: "blockMath", raw: match[0], text: (match[1] ?? match[2]).trim() };
-		return token;
-	},
-};
+function findClosingDelimiter(source: string, closing: string, start: number): number {
+	let index = source.indexOf(closing, start);
+	while (index >= 0 && isEscaped(source, index)) {
+		index = source.indexOf(closing, index + closing.length);
+	}
+	return index;
+}
 
-// $...$ uses the pandoc/GitHub rules to avoid matching prose dollar amounts:
-// the opening $ must be followed by a non-space, the closing $ preceded by a
-// non-space and not followed by a digit ("between $5 and $10" never matches).
-const INLINE_MATH_PATTERNS = [
-	/^\$\$([\s\S]+?)\$\$/, // display math used mid-paragraph
-	/^\\\[([\s\S]+?)\\\]/,
-	/^\\\(([\s\S]+?)\\\)/,
-	/^\$([^\s$](?:[^$\n]*[^\s$])?)\$(?!\d)/,
-];
+function looksLikePendingDollarMath(source: string): boolean {
+	return /\\[A-Za-z]+|[_^=+*/<>()[\]|±≤≥≠≈∈→⇒∞∫∑√-]/.test(source);
+}
 
-const inlineMathExtension: TokenizerExtension = {
-	name: "inlineMath",
-	level: "inline",
-	// Only "$" needs a start() hint: backslashes already terminate text runs,
-	// but the text tokenizer would swallow a bare "$" without one.
-	start: (src: string) => {
-		const index = src.indexOf("$");
-		return index === -1 ? undefined : index;
-	},
-	tokenizer(src: string): Tokens.Generic | undefined {
-		const first = src.charCodeAt(0);
-		if (first !== 0x24 /* $ */ && first !== 0x5c /* \ */) {
-			return undefined;
-		}
-		for (const pattern of INLINE_MATH_PATTERNS) {
-			const match = pattern.exec(src);
-			if (match) {
-				const token: MathToken = { type: "inlineMath", raw: match[0], text: match[1].trim() };
-				return token;
-			}
+function tokenizeInlineMath(source: string): MathToken | undefined {
+	let opening = "";
+	let closing = "";
+	if (source.startsWith("$$")) {
+		opening = "$$";
+		closing = "$$";
+	} else if (source.startsWith("\\(")) {
+		opening = "\\(";
+		closing = "\\)";
+	} else if (source.startsWith("\\[")) {
+		opening = "\\[";
+		closing = "\\]";
+	} else if (source.startsWith("$") && !/^\$\s/.test(source)) {
+		opening = "$";
+		closing = "$";
+	} else {
+		return undefined;
+	}
+
+	const closingIndex = findClosingDelimiter(source, closing, opening.length);
+	if (
+		closingIndex >= 0 &&
+		opening === "$" &&
+		(/\s$/.test(source.slice(opening.length, closingIndex)) ||
+			/^\d/.test(source.slice(closingIndex + 1)) ||
+			(/^[A-Z_][A-Z0-9_]*(?:[^A-Za-z0-9_\s])?$/.test(source.slice(opening.length, closingIndex)) &&
+				/^[A-Za-z_][A-Za-z0-9_]*/.test(source.slice(closingIndex + 1))) ||
+			source.slice(opening.length, closingIndex).includes("`"))
+	) {
+		return undefined;
+	}
+
+	if (closingIndex < 0) {
+		const pendingSource = source.slice(opening.length);
+		if (opening.startsWith("\\") || looksLikePendingDollarMath(pendingSource)) {
+			return { type: "inlineMath", raw: source, text: pendingSource, pending: true };
 		}
 		return undefined;
+	}
+
+	const text = source.slice(opening.length, closingIndex);
+	if (!text) {
+		return undefined;
+	}
+
+	const raw = source.slice(0, closingIndex + closing.length);
+	return { type: "inlineMath", raw, text };
+}
+
+function tokenizeBlockMath(source: string): MathToken | undefined {
+	// Keep Prime's permissive leading indentation: models commonly indent display math by four spaces.
+	const dollarMatch = /^[ \t]*\$\$[ \t]*(?:\n)?([\s\S]*?)\$\$[ \t]*(?:\n|$)/.exec(source);
+	if (dollarMatch?.[1]) {
+		return { type: "blockMath", raw: dollarMatch[0], text: dollarMatch[1].trim() };
+	}
+
+	const bracketMatch = /^[ \t]*\\\[[ \t]*(?:\n)?([\s\S]*?)\\\][ \t]*(?:\n|$)/.exec(source);
+	if (bracketMatch?.[1]) {
+		return { type: "blockMath", raw: bracketMatch[0], text: bracketMatch[1].trim() };
+	}
+
+	const pendingBracket = /^[ \t]*\\\[[ \t]*(?:\n)?([\s\S]*)$/.exec(source);
+	if (pendingBracket) {
+		return { type: "blockMath", raw: pendingBracket[0], text: pendingBracket[1], pending: true };
+	}
+	const pendingDollar = /^[ \t]*\$\$[ \t]*(?:\n)?([\s\S]*)$/.exec(source);
+	if (pendingDollar?.[1] && looksLikePendingDollarMath(pendingDollar[1])) {
+		return { type: "blockMath", raw: pendingDollar[0], text: pendingDollar[1], pending: true };
+	}
+	return undefined;
+}
+
+const MATH_MARKDOWN_EXTENSIONS: readonly TokenizerExtension[] = [
+	{
+		name: "blockMath",
+		level: "block",
+		start(source) {
+			const match = /(?:^|\n)[ \t]*(?:\$\$|\\\[)/.exec(source);
+			return match ? match.index + (match[0].startsWith("\n") ? 1 : 0) : undefined;
+		},
+		tokenizer: tokenizeBlockMath,
 	},
-};
+	{
+		name: "inlineMath",
+		level: "inline",
+		start(source) {
+			const indices = [source.indexOf("$"), source.indexOf("\\("), source.indexOf("\\[")].filter(
+				(index) => index >= 0,
+			);
+			return indices.length > 0 ? Math.min(...indices) : undefined;
+		},
+		tokenizer: tokenizeInlineMath,
+	},
+];
 
 const markdownParser = new Marked();
 markdownParser.setOptions({
@@ -121,7 +164,7 @@ const mathMarkdownParser = new Marked();
 mathMarkdownParser.setOptions({
 	tokenizer: new StrictStrikethroughTokenizer(),
 });
-mathMarkdownParser.use({ extensions: [blockMathExtension, inlineMathExtension] });
+mathMarkdownParser.use({ extensions: [...MATH_MARKDOWN_EXTENSIONS] });
 
 function pickMarkdownParser(text: string): Marked {
 	return text.includes("$") || text.includes("\\(") || text.includes("\\[") ? mathMarkdownParser : markdownParser;
@@ -174,6 +217,11 @@ export interface MarkdownTheme {
 	mathBlock?: (text: string) => string;
 }
 
+export interface MarkdownOptions {
+	/** Render supported LaTeX math expressions as Unicode text (default: true). */
+	renderLatex?: boolean;
+}
+
 interface InlineStyleContext {
 	applyText: (text: string) => string;
 	stylePrefix: string;
@@ -185,6 +233,7 @@ export class Markdown implements Component {
 	private paddingY: number; // Top/bottom padding
 	private defaultTextStyle?: DefaultTextStyle;
 	private theme: MarkdownTheme;
+	private options: MarkdownOptions;
 	private defaultStylePrefix?: string;
 
 	// Cache for rendered output
@@ -204,12 +253,14 @@ export class Markdown implements Component {
 		paddingY: number,
 		theme: MarkdownTheme,
 		defaultTextStyle?: DefaultTextStyle,
+		options?: MarkdownOptions,
 	) {
 		this.text = text;
 		this.paddingX = paddingX;
 		this.paddingY = paddingY;
 		this.theme = theme;
 		this.defaultTextStyle = defaultTextStyle;
+		this.options = options ? { ...options } : {};
 	}
 
 	setText(text: string): void {
@@ -624,7 +675,11 @@ export class Markdown implements Component {
 
 				case "inlineMath": {
 					const mathStyle = this.theme.math ?? this.theme.code;
-					const converted = latexToUnicode((token as unknown as MathToken).text).replace(/\s*\n\s*/g, " ");
+					const mathToken = token as unknown as MathToken;
+					const converted =
+						!mathToken.pending && this.options.renderLatex !== false
+							? (renderLatex(mathToken.text) ?? mathToken.raw)
+							: mathToken.raw;
 					result += mathStyle(converted) + stylePrefix;
 					break;
 				}
@@ -795,15 +850,15 @@ export class Markdown implements Component {
 		return codeLines.map((codeLine) => `${indent}${codeLine}`);
 	}
 
-	/** Render display math: converted to Unicode, indented like a code block. */
+	/** Render display math with terminal-width-aware stacked layouts. */
 	private renderMathBlock(token: MathToken): string[] {
 		const indent = this.theme.codeBlockIndent ?? "  ";
 		const style = this.theme.mathBlock ?? this.theme.codeBlock;
-		const mathLines = latexToUnicode(token.text)
-			.split("\n")
-			.map((line) => line.trim())
-			.filter((line) => line.length > 0);
-		return mathLines.map((line) => indent + style(line));
+		const rendered =
+			!token.pending && this.options.renderLatex !== false
+				? (renderLatex(token.text, { display: true }) ?? token.raw.trim())
+				: token.raw.trim();
+		return rendered.split("\n").map((line) => indent + style(line));
 	}
 
 	/**

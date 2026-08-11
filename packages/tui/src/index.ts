@@ -65,7 +65,7 @@ export {
 	setKittyProtocolActive,
 } from "./keys.js";
 // LaTeX math to Unicode conversion
-export { latexToUnicode } from "./latex.js";
+export { latexToUnicode, type RenderLatexOptions, renderLatex } from "./latex.js";
 // SGR mouse event parsing
 export {
 	isMouseSequence,
