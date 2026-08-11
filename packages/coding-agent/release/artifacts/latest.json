@@ -1,0 +1,27 @@
+{
+  "version": "v0.7.1-fork.59d2cf38",
+  "package": "prime-agent",
+  "tarball": "releases/v0.7.1-fork.59d2cf38/prime-agent-0.7.1-fork.59d2cf38.tgz",
+  "tarballs": [
+    {
+      "package": "prime-agent",
+      "file": "prime-agent-0.7.1-fork.59d2cf38.tgz",
+      "sha256": "ae8d41368e0a831226a7845682709c75b3664b4fad0b4b4641e3938b112f11d0"
+    },
+    {
+      "package": "prime-agent-ai",
+      "file": "prime-agent-ai-0.7.1-fork.59d2cf38.tgz",
+      "sha256": "4b07116bd92d1a7ec41fe462647cf8459c7e02dfba3073caea97c86560938366"
+    },
+    {
+      "package": "prime-agent-core",
+      "file": "prime-agent-core-0.7.1-fork.59d2cf38.tgz",
+      "sha256": "231c59eb61ceecfcd4fec771d9faefd03c2ea883bef84358dc647bd7308cfb27"
+    },
+    {
+      "package": "prime-agent-tui",
+      "file": "prime-agent-tui-0.7.1-fork.59d2cf38.tgz",
+      "sha256": "16a3d49b1bb913e81b60ff36c220cffef64a47d027166c134821934c32d4c498"
+    }
+  ]
+}
