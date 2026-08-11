@@ -68,7 +68,9 @@
 	},
 	"files": [
 		"dist",
-		"README.md"
+		"README.md",
+		"LICENSE",
+		"NOTICE"
 	],
 	"scripts": {
 		"clean": "shx rm -rf dist",

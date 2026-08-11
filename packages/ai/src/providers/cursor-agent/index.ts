@@ -33,6 +33,7 @@ import type {
 	Tool,
 	ToolCall,
 	ToolResultMessage,
+	Usage,
 } from "../../types.js";
 import {
 	type CursorExecResolvedCarrier,
@@ -66,6 +67,8 @@ import {
 	ClientHeartbeatSchema,
 	ComputerUseErrorSchema,
 	ComputerUseResultSchema,
+	ConnectScmRequestResponse_RejectedSchema,
+	ConnectScmRequestResponseSchema,
 	ConversationActionSchema,
 	ConversationSearchErrorSchema,
 	ConversationSearchResultSchema,
@@ -101,6 +104,8 @@ import {
 	ForceBackgroundShellStatus,
 	ForceBackgroundSubagentResultSchema,
 	ForceBackgroundSubagentStatus,
+	GenerateImageRequestResponse_RejectedSchema,
+	GenerateImageRequestResponseSchema,
 	GetBlobResultSchema,
 	GrepContentMatchSchema,
 	GrepContentResultSchema,
@@ -134,6 +139,8 @@ import {
 	McpAllowlistPrecheckResultSchema,
 	McpApprovedSchema,
 	McpArgsSchema,
+	McpAuthRequestResponse_RejectedSchema,
+	McpAuthRequestResponseSchema,
 	McpErrorSchema,
 	McpImageContentSchema,
 	McpRejectedSchema,
@@ -147,6 +154,8 @@ import {
 	McpToolResultContentItemSchema,
 	McpToolResultSchema,
 	ModelDetailsSchema,
+	PrManagementRejectedSchema,
+	PrManagementResultSchema,
 	ReadErrorSchema,
 	ReadMcpResourceErrorSchema,
 	type ReadMcpResourceExecResult,
@@ -158,6 +167,8 @@ import {
 	ReadSuccessSchema,
 	RecordScreenFailureSchema,
 	RecordScreenResultSchema,
+	ReplaceEnvFailureSchema,
+	ReplaceEnvResultSchema,
 	RequestContextResultSchema,
 	RequestContextSchema,
 	RequestContextSuccessSchema,
@@ -194,6 +205,8 @@ import {
 	UserMessageActionSchema,
 	UserMessageSchema,
 	WebFetchAllowlistPrecheckResultSchema,
+	WebFetchRequestResponse_RejectedSchema,
+	WebFetchRequestResponseSchema,
 	WebSearchRequestResponse_RejectedSchema,
 	WebSearchRequestResponseSchema,
 	WriteErrorSchema,
@@ -205,6 +218,7 @@ import {
 } from "./agent_pb.js";
 import {
 	$env,
+	canonicalKimiK3ModelId,
 	connectProxiedSocket,
 	createRequestDebugSession,
 	deterministicUuid,
@@ -777,6 +791,7 @@ export const streamCursor: StreamFunction<"cursor-agent", CursorAgentOptions> = 
 			stopReason: "stop",
 			timestamp: Date.now(),
 		};
+		const wireModelId = resolveCursorWireModelId(model, options);
 
 		// Declared outside the `try` because BOTH exits must drain it: an exec
 		// handler decoded from the last chunk can still be running when the
@@ -1107,7 +1122,7 @@ export const streamCursor: StreamFunction<"cursor-agent", CursorAgentOptions> = 
 			endCurrentThinkingBlock(output, stream, state);
 			flushOpenToolCalls(output, stream, state);
 
-			calculateCost(model, output.usage);
+			calculateCursorAgentUsageCost(model, wireModelId, output.usage);
 
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
@@ -1251,17 +1266,21 @@ export async function handleServerMessage(
 		const signal = providerSignal
 			? AbortSignal.any([providerSignal, abortController.signal])
 			: abortController.signal;
+		const execContext: CursorExecHandlerContext = { signal };
 		try {
 			const execWork = handleExecServerMessage(
 				execMessage,
 				h2Request,
 				execHandlers,
-				onToolResult,
+				// Result hooks race the per-exec abort just like the handlers
+				// themselves: a hung `onToolResult` must reject on abort instead of
+				// keeping this dispatch (and the terminal drain awaiting it) open.
+				bindCursorToolResultHandler(onToolResult, execContext),
 				requestContextTools,
 				output,
 				stream,
 				state,
-				{ signal },
+				execContext,
 			);
 			await (stream.trackLocalWork?.(execWork) ?? execWork);
 		} catch (error) {
@@ -1359,72 +1378,10 @@ export function handleKvServerMessage(
 	}
 }
 
-/** Current Cursor CLI v2026.08.04 InteractionQuery fields absent from the OMP baseline descriptor. */
-const CURRENT_INTERACTION_WIRE_FIELDS = new Set([9, 10, 11, 12, 13, 14]);
-
-function encodeVarint(value: number): Uint8Array {
-	const bytes: number[] = [];
-	let remaining = value >>> 0;
-	do {
-		let byte = remaining & 0x7f;
-		remaining >>>= 7;
-		if (remaining !== 0) byte |= 0x80;
-		bytes.push(byte);
-	} while (remaining !== 0);
-	return Uint8Array.from(bytes);
-}
-
-function encodeLengthDelimitedField(fieldNo: number, data: Uint8Array): Uint8Array {
-	const tag = encodeVarint((fieldNo << 3) | 2);
-	const length = encodeVarint(data.byteLength);
-	const encoded = new Uint8Array(tag.byteLength + length.byteLength + data.byteLength);
-	encoded.set(tag, 0);
-	encoded.set(length, tag.byteLength);
-	encoded.set(data, tag.byteLength + length.byteLength);
-	return encoded;
-}
-
-function encodeStringField(fieldNo: number, value: string): Uint8Array {
-	return encodeLengthDelimitedField(fieldNo, new TextEncoder().encode(value));
-}
-
-/**
- * Encode the exact current response message nested under InteractionResponse.
- * The checked-in generated descriptor is the documented OMP/Cursor 2026.02.06
- * baseline. Buf preserves newer query fields in `$unknown`; matching response
- * fields are therefore emitted as preserved length-delimited unknowns too.
- */
-function currentInteractionResponsePayload(fieldNo: number, reason: string): Uint8Array {
-	switch (fieldNo) {
-		case 9: // WebFetchRequestResponse.rejected = 2, Rejected.reason = 1
-		case 11: // McpAuthRequestResponse.rejected = 2, Rejected.reason = 1
-		case 12: // GenerateImageRequestResponse.rejected = 2, Rejected.reason = 1
-		case 14: // ConnectScmRequestResponse.rejected = 2, Rejected.reason = 1
-			return encodeLengthDelimitedField(2, encodeStringField(1, reason));
-		case 10: // PrManagementResult.rejected = 3, PrManagementRejected.reason = 1
-			return encodeLengthDelimitedField(3, encodeStringField(1, reason));
-		case 13: // ReplaceEnvResult.failure = 2, ReplaceEnvFailure.error_message = 1
-			return encodeLengthDelimitedField(2, encodeStringField(1, reason));
-		default:
-			throw new Error(`Unsupported current InteractionQuery wire field ${fieldNo}`);
-	}
-}
-
-function currentUnknownInteractionField(query: InteractionQuery): number | undefined {
-	// Oneof semantics are last-field-wins. Preserve that rule for fields the old
-	// descriptor cannot name instead of guessing from payload contents.
-	for (let index = (query.$unknown?.length ?? 0) - 1; index >= 0; index--) {
-		const field = query.$unknown?.[index];
-		if (field?.wireType === 2 && CURRENT_INTERACTION_WIRE_FIELDS.has(field.no)) return field.no;
-	}
-	return undefined;
-}
-
 /** Resolve every current InteractionQuery with a populated, matching response arm. */
 export function handleInteractionQuery(query: InteractionQuery, h2Request: http2.ClientHttp2Stream): void {
 	const reason = NOT_IMPLEMENTED;
 	let result: ReturnType<typeof create<typeof InteractionResponseSchema>>["result"] = { case: undefined };
-	let rawResultField: number | undefined;
 	switch (query.query.case) {
 		case "webSearchRequestQuery":
 			result = {
@@ -1500,28 +1457,75 @@ export function handleInteractionQuery(query: InteractionQuery, h2Request: http2
 				}),
 			};
 			break;
-		default:
-			rawResultField = currentUnknownInteractionField(query);
+		// Cursor CLI v2026.08.04 fields 9-14, typed in the regenerated descriptor.
+		case "webFetchRequestQuery":
+			result = {
+				case: "webFetchRequestResponse",
+				value: create(WebFetchRequestResponseSchema, {
+					result: {
+						case: "rejected",
+						value: create(WebFetchRequestResponse_RejectedSchema, { reason }),
+					},
+				}),
+			};
+			break;
+		case "prManagementRequestQuery":
+			result = {
+				case: "prManagementResult",
+				value: create(PrManagementResultSchema, {
+					result: { case: "rejected", value: create(PrManagementRejectedSchema, { reason }) },
+				}),
+			};
+			break;
+		case "mcpAuthRequestQuery":
+			result = {
+				case: "mcpAuthRequestResponse",
+				value: create(McpAuthRequestResponseSchema, {
+					result: {
+						case: "rejected",
+						value: create(McpAuthRequestResponse_RejectedSchema, { reason }),
+					},
+				}),
+			};
+			break;
+		case "generateImageRequestQuery":
+			result = {
+				case: "generateImageRequestResponse",
+				value: create(GenerateImageRequestResponseSchema, {
+					result: {
+						case: "rejected",
+						value: create(GenerateImageRequestResponse_RejectedSchema, { reason }),
+					},
+				}),
+			};
+			break;
+		case "replaceEnvArgs":
+			result = {
+				case: "replaceEnvResult",
+				value: create(ReplaceEnvResultSchema, {
+					result: { case: "failure", value: create(ReplaceEnvFailureSchema, { errorMessage: reason }) },
+				}),
+			};
+			break;
+		case "connectScmRequestQuery":
+			result = {
+				case: "connectScmRequestResponse",
+				value: create(ConnectScmRequestResponseSchema, {
+					result: {
+						case: "rejected",
+						value: create(ConnectScmRequestResponse_RejectedSchema, { reason }),
+					},
+				}),
+			};
 			break;
 	}
 
 	const interactionResponse = create(InteractionResponseSchema, { id: query.id, result });
-	if (rawResultField !== undefined) {
-		const payload = currentInteractionResponsePayload(rawResultField, reason);
-		const data = new Uint8Array(encodeVarint(payload.byteLength).byteLength + payload.byteLength);
-		const length = encodeVarint(payload.byteLength);
-		data.set(length, 0);
-		data.set(payload, length.byteLength);
-		interactionResponse.$unknown = [{ no: rawResultField, wireType: 2, data }];
-	}
 	const response = create(AgentClientMessageSchema, {
 		message: { case: "interactionResponse", value: interactionResponse },
 	});
 	h2Request.write(frameConnectMessage(toBinary(AgentClientMessageSchema, response)));
-	log("interactionResponse", query.query.case ?? `wireField${rawResultField ?? "unknown"}`, {
-		id: query.id,
-		result: result.case ?? (rawResultField === undefined ? undefined : `wireField${rawResultField}`),
-	});
+	log("interactionResponse", query.query.case, { id: query.id, result: result.case });
 }
 
 function sendShellStreamEvent(
@@ -1856,6 +1860,37 @@ function bindCursorExecHandler<TArgs, TResult>(
 	return (args) => raceCursorExecWithAbort(handler.call(owner, args, context), context.signal);
 }
 
+/**
+ * Single-call form of {@link bindCursorExecHandler} for the exec hooks whose
+ * result is not a `CursorExecHandlerResult` (MCP approval preflight, MCP
+ * resource listing/reads). They await through the same abort race so a hung
+ * hook rejects on abort instead of blocking the dispatch — and with it the
+ * terminal drain — forever.
+ */
+function invokeCursorExecHandler<TArgs, TResult>(
+	handler: ((args: TArgs, context?: CursorExecHandlerContext) => Promise<TResult>) | undefined,
+	owner: CursorExecHandlers | undefined,
+	args: TArgs,
+	context: CursorExecHandlerContext,
+): Promise<TResult | undefined> {
+	if (!handler) return Promise.resolve(undefined);
+	return raceCursorExecWithAbort(handler.call(owner, args, context), context.signal);
+}
+
+/**
+ * Bind a result hook to the per-exec abort race, mirroring
+ * {@link bindCursorExecHandler}. The hook awaits in `resolveExecHandler` and
+ * `pairSynthesizedExecResult` run after the handler finishes, so an unraced
+ * hook could hold an otherwise-aborted exec open indefinitely.
+ */
+function bindCursorToolResultHandler(
+	handler: CursorToolResultHandler | undefined,
+	context: CursorExecHandlerContext,
+): CursorToolResultHandler | undefined {
+	if (!handler) return undefined;
+	return (toolResult) => raceCursorExecWithAbort(Promise.resolve(handler(toolResult)), context.signal);
+}
+
 async function handleExecServerMessage(
 	execMsg: ExecServerMessage,
 	h2Request: http2.ClientHttp2Stream,
@@ -2148,7 +2183,13 @@ async function handleExecServerMessage(
 			// there is nothing to decide with, so it is refused. Either way no
 			// block is synthesized — nothing ran.
 			if (mcpCall.approvalOnly) {
-				const approved = (await execHandlers?.mcpApprovalPreflight?.(mcpCall, execContext)) === true;
+				const approved =
+					(await invokeCursorExecHandler(
+						execHandlers?.mcpApprovalPreflight,
+						execHandlers,
+						mcpCall,
+						execContext,
+					)) === true;
 				sendExecClientMessage(
 					h2Request,
 					execMsg,
@@ -2213,7 +2254,13 @@ async function handleExecServerMessage(
 				});
 			}
 			try {
-				const resources = (await execHandlers?.listMcpResources?.({ server: args.server }, execContext)) ?? [];
+				const resources =
+					(await invokeCursorExecHandler(
+						execHandlers?.listMcpResources,
+						execHandlers,
+						{ server: args.server },
+						execContext,
+					)) ?? [];
 				execResult = create(ListMcpResourcesExecResultSchema, {
 					result: {
 						case: "success",
@@ -2282,7 +2329,9 @@ async function handleExecServerMessage(
 				// `null` is the handler's "no such server or uri", which is exactly
 				// `not_found`; a throw is a real failure and must not masquerade as
 				// a missing resource.
-				const content = await execHandlers?.readMcpResource?.(
+				const content = await invokeCursorExecHandler(
+					execHandlers?.readMcpResource,
+					execHandlers,
 					{
 						server: args.server,
 						uri: args.uri,
@@ -4689,7 +4738,9 @@ function canReplayCursorThinking(msg: AssistantMessage, targetModelId: string | 
 		isKimiK3ModelId(targetModelId) &&
 		msg.api === "cursor-agent" &&
 		(msg.provider === "cursor" || msg.provider === "cursor-agent") &&
-		msg.model === targetModelId
+		// Route-aware: a turn persisted under any K3 route id (low/high/max)
+		// replays against any other route of the same logical model.
+		canonicalKimiK3ModelId(msg.model) === canonicalKimiK3ModelId(targetModelId)
 	);
 }
 
@@ -4740,7 +4791,7 @@ function assertCursorKimiK3HistoryReplayable(
 		const isSameCursorModel =
 			msg.api === "cursor-agent" &&
 			(msg.provider === "cursor" || msg.provider === "cursor-agent") &&
-			msg.model === targetModelId;
+			canonicalKimiK3ModelId(msg.model) === canonicalKimiK3ModelId(targetModelId);
 		if (!isSameCursorModel) {
 			// Foreign history genuinely cannot replay K3 thinking: another model's
 			// turns carry no K3-signed reasoning to reconstruct.
@@ -5229,7 +5280,7 @@ async function buildGrpcRequest(
 		turns,
 	});
 
-	const wireModelId = options?.requestModelId ?? model.requestModelId ?? model.id;
+	const wireModelId = resolveCursorWireModelId(model, options);
 	const cursorMaxMode = model.cursorMaxMode === true;
 	const modelDetails = create(ModelDetailsSchema, {
 		modelId: wireModelId,
@@ -5298,6 +5349,32 @@ const CURSOR_GROK_FAST_ROUTES: Readonly<Record<string, string>> = {
 	"cursor-grok-4.5-medium": "cursor-grok-4.5-medium-fast",
 	"cursor-grok-4.5-high": "cursor-grok-4.5-high-fast",
 };
+
+const CURSOR_GROK_FAST_ROUTE_IDS: ReadonlySet<string> = new Set(Object.values(CURSOR_GROK_FAST_ROUTES));
+
+/**
+ * Published Grok 4.5 Fast rates (https://cursor.com/docs/models/grok-4-5):
+ * $4/M input, $18/M output — above the standard $2/$6 model metadata. Cached
+ * tokens keep the standard rate; Cursor publishes no separate fast cache price.
+ */
+const CURSOR_GROK_FAST_COST = { input: 4, output: 18 } as const;
+
+/** Concrete wire model a request runs against: the routed sibling id when reasoning/fast routing resolved one. */
+function resolveCursorWireModelId(model: Model<"cursor-agent">, options: CursorOptions | undefined): string {
+	return options?.requestModelId ?? model.requestModelId ?? model.id;
+}
+
+/** Exported for tests: bill fast routes at fast rates, everything else at the model's standard metadata. */
+export function calculateCursorAgentUsageCost(
+	model: Model<"cursor-agent">,
+	wireModelId: string,
+	usage: Usage,
+): Usage["cost"] {
+	const billed = CURSOR_GROK_FAST_ROUTE_IDS.has(wireModelId)
+		? { ...model, cost: { ...model.cost, ...CURSOR_GROK_FAST_COST } }
+		: model;
+	return calculateCost(billed, usage);
+}
 
 /** Resolve Prime reasoning and fast state to an exact current Cursor wire model ID. */
 export function resolveCursorAgentModelId(

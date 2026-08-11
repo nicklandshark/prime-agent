@@ -1,15 +1,26 @@
-import { create, fromBinary } from "@bufbuild/protobuf";
+import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import { describe, expect, it } from "vitest";
 import {
 	type AgentClientMessage,
 	AgentClientMessageSchema,
 	AskQuestionInteractionQuerySchema,
+	ConnectScmArgsSchema,
+	ConnectScmRequestQuerySchema,
 	CreatePlanRequestQuerySchema,
 	ExaFetchRequestQuerySchema,
 	ExaSearchRequestQuerySchema,
+	GenerateImageArgsSchema,
+	GenerateImageRequestQuerySchema,
 	InteractionQuerySchema,
+	McpAuthArgsSchema,
+	McpAuthRequestQuerySchema,
+	PrManagementArgsSchema,
+	PrManagementRequestQuerySchema,
+	ReplaceEnvArgsSchema,
 	SetupVmEnvironmentArgsSchema,
 	SwitchModeRequestQuerySchema,
+	WebFetchArgsSchema,
+	WebFetchRequestQuerySchema,
 	WebSearchRequestQuerySchema,
 } from "../src/providers/cursor-agent/agent_pb.js";
 import { handleInteractionQuery } from "../src/providers/cursor-agent/index.js";
@@ -51,31 +62,6 @@ function concat(...parts: Uint8Array[]): Uint8Array {
 
 function wireMessageField(fieldNo: number, data = new Uint8Array()): Uint8Array {
 	return concat(varint((fieldNo << 3) | 2), varint(data.byteLength), data);
-}
-
-function currentUnknownQuery(id: number, fieldNo: number) {
-	// Decode actual protobuf bytes rather than attaching `$unknown` directly: this
-	// proves Buf preserves current descriptor fields missing from the baseline.
-	return fromBinary(InteractionQuerySchema, concat(varint(8), varint(id), wireMessageField(fieldNo)));
-}
-
-function readVarint(data: Uint8Array, offset: number): [value: number, offset: number] {
-	let value = 0;
-	let shift = 0;
-	while (offset < data.byteLength) {
-		const byte = data[offset++];
-		value |= (byte & 0x7f) << shift;
-		if ((byte & 0x80) === 0) return [value, offset];
-		shift += 7;
-	}
-	throw new Error("truncated varint");
-}
-
-function firstLengthDelimitedField(data: Uint8Array): { fieldNo: number; data: Uint8Array } {
-	const [tag, afterTag] = readVarint(data, 0);
-	expect(tag & 7).toBe(2);
-	const [length, afterLength] = readVarint(data, afterTag);
-	return { fieldNo: tag >>> 3, data: data.subarray(afterLength, afterLength + length) };
 }
 
 describe("Cursor interaction query bridge", () => {
@@ -127,38 +113,126 @@ describe("Cursor interaction query bridge", () => {
 		expect((response.message.value.result.value as any).result.case).toBe("success");
 	});
 
+	// Cursor CLI v2026.08.04 fields 9-14: typed in the regenerated descriptor,
+	// so the query decodes into a named oneof case and the response carries the
+	// matching typed rejection arm.
 	it.each([
-		[9, 2, "web fetch"],
-		[10, 3, "PR management"],
-		[11, 2, "MCP auth"],
-		[12, 2, "generate image"],
-		[13, 2, "replace env"],
-		[14, 2, "connect SCM"],
+		[9, "webFetchRequestQuery", WebFetchRequestQuerySchema, "webFetchRequestResponse", "rejected"],
+		[10, "prManagementRequestQuery", PrManagementRequestQuerySchema, "prManagementResult", "rejected"],
+		[11, "mcpAuthRequestQuery", McpAuthRequestQuerySchema, "mcpAuthRequestResponse", "rejected"],
+		[12, "generateImageRequestQuery", GenerateImageRequestQuerySchema, "generateImageRequestResponse", "rejected"],
+		[13, "replaceEnvArgs", ReplaceEnvArgsSchema, "replaceEnvResult", "failure"],
+		[14, "connectScmRequestQuery", ConnectScmRequestQuerySchema, "connectScmRequestResponse", "rejected"],
 	] as const)(
-		"preserves current field %i %s and emits its exact populated raw response arm",
-		(fieldNo, nestedArm, _label) => {
-			const query = currentUnknownQuery(43, fieldNo);
-			expect(query.query.case).toBeUndefined();
-			expect(query.$unknown?.map((field) => field.no)).toEqual([fieldNo]);
+		"decodes current field %i as typed %s and answers with typed %s",
+		(fieldNo, queryCase, schema, responseCase, nestedCase) => {
+			// Decode actual wire bytes (id + the raw field a real client sends):
+			// pins the descriptor's field number, not just its presence.
+			const rawQuery = concat(varint(8), varint(43), wireMessageField(fieldNo));
+			const wireQuery = fromBinary(InteractionQuerySchema, rawQuery);
+			expect(wireQuery.query.case).toBe(queryCase);
+			expect(wireQuery.$unknown).toBeUndefined();
+
+			// The typed form survives a full encode/decode round trip.
+			const typed = create(InteractionQuerySchema, {
+				id: 43,
+				query: { case: queryCase, value: create(schema as never) } as never,
+			});
+			const query = fromBinary(InteractionQuerySchema, toBinary(InteractionQuerySchema, typed));
+			expect(query.query.case).toBe(queryCase);
+			expect(query.$unknown).toBeUndefined();
 
 			const response = decodeResponse(query);
 			expect(response.message.case).toBe("interactionResponse");
 			if (response.message.case !== "interactionResponse") throw new Error("wrong response envelope");
 			expect(response.message.value.id).toBe(43);
-			expect(response.message.value.result.case).toBeUndefined();
-			const raw = response.message.value.$unknown;
-			expect(raw).toHaveLength(1);
-			expect(raw?.[0]).toMatchObject({ no: fieldNo, wireType: 2 });
-			const unknownData = raw?.[0]?.data ?? new Uint8Array();
-			const [payloadLength, payloadOffset] = readVarint(unknownData, 0);
-			const payload = unknownData.subarray(payloadOffset, payloadOffset + payloadLength);
-			const outer = firstLengthDelimitedField(payload);
-			expect(outer.fieldNo).toBe(nestedArm);
-			const detail = firstLengthDelimitedField(outer.data);
-			expect(detail.fieldNo).toBe(1);
-			expect(new TextDecoder().decode(detail.data)).toMatch(/Not implemented by this client/i);
+			expect(response.message.value.result.case).toBe(responseCase);
+			const value = response.message.value.result.value as any;
+			expect(value.result?.case).toBe(nestedCase);
+			expect(value.result?.value?.reason ?? value.result?.value?.errorMessage).toMatch(
+				/Not implemented by this client/i,
+			);
 		},
 	);
+
+	it("decodes populated args for the field 9-14 query families", () => {
+		// The bridge rejects without reading args, but the typed schema must
+		// carry them: a query with real arguments decodes losslessly.
+		const cases = [
+			[
+				"webFetchRequestQuery",
+				WebFetchRequestQuerySchema,
+				{ args: create(WebFetchArgsSchema, { url: "https://example.com", toolCallId: "t1" }), skipApproval: true },
+			],
+			[
+				"prManagementRequestQuery",
+				PrManagementRequestQuerySchema,
+				{
+					args: create(PrManagementArgsSchema, {
+						toolCallId: "t2",
+						action: { case: "getCiStatus", value: { prUrl: "https://github.com/x/y/pull/1" } },
+					}),
+				},
+			],
+			[
+				"mcpAuthRequestQuery",
+				McpAuthRequestQuerySchema,
+				{ args: create(McpAuthArgsSchema, { serverIdentifier: "ops", toolCallId: "t3" }) },
+			],
+			[
+				"generateImageRequestQuery",
+				GenerateImageRequestQuerySchema,
+				{
+					args: create(GenerateImageArgsSchema, {
+						description: "logo",
+						filePath: "assets/logo.png",
+						referenceImagePaths: ["ref.png"],
+						aspectRatio: "1:1",
+					}),
+					toolCallId: "t4",
+				},
+			],
+			[
+				"replaceEnvArgs",
+				ReplaceEnvArgsSchema,
+				{ config: { installScript: "make setup" }, mode: 2, checkoutRefOverrides: [{ repoUrl: "r", ref: "f" }] },
+			],
+			[
+				"connectScmRequestQuery",
+				ConnectScmRequestQuerySchema,
+				{
+					args: create(ConnectScmArgsSchema, {
+						toolCallId: "t6",
+						target: { case: "github", value: { repository: { owner: "o", repo: "r" } } },
+					}),
+				},
+			],
+		] as const;
+		for (const [queryCase, schema, value] of cases) {
+			const query = fromBinary(
+				InteractionQuerySchema,
+				toBinary(
+					InteractionQuerySchema,
+					create(InteractionQuerySchema, {
+						id: 45,
+						query: { case: queryCase, value: create(schema as never, value as never) } as never,
+					}),
+				),
+			);
+			expect(query.query.case).toBe(queryCase);
+			// Re-encoding the decoded query is byte-identical: nothing was lost
+			// to `$unknown` on the way in.
+			expect(toBinary(InteractionQuerySchema, query)).toEqual(
+				toBinary(
+					InteractionQuerySchema,
+					create(InteractionQuerySchema, {
+						id: 45,
+						query: { case: queryCase, value: create(schema as never, value as never) } as never,
+					}),
+				),
+			);
+		}
+	});
 
 	it("matches all eleven current Cursor 2026.08.04 descriptor fields and excludes removed Exa fields", () => {
 		expect([2, 3, 4, 7, 8, 9, 10, 11, 12, 13, 14]).toHaveLength(11);

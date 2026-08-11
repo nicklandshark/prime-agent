@@ -1,0 +1,21 @@
+@earendil-works/pi-ai
+=====================
+
+This package contains files derived from Oh My Pi (OMP) and from the
+Cursor Agent CLI protocol schema baseline preserved in OMP:
+
+  - src/providers/cursor-agent/agent.proto
+  - src/providers/cursor-agent/agent_pb.ts (generated from agent.proto)
+  - src/providers/cursor-agent/index.ts (OMP-derived portions)
+  - src/providers/cursor-agent/exec-modern.ts (OMP-derived portions)
+
+These files ship in compiled form under dist/providers/cursor-agent/.
+
+OMP-derived portions are MIT licensed; Copyright (c) 2025-2026 Can Bölük.
+The Cursor schema baseline was preserved from OMP commit
+45e12e5bb758198a920c6070e7e64cb33b21beac (Cursor Agent CLI v2026.02.06).
+This provenance statement does not assert that Cursor publishes the
+schema under MIT.
+
+The complete MIT license text, including the OMP copyright notice, is
+provided in the LICENSE file distributed with this package.

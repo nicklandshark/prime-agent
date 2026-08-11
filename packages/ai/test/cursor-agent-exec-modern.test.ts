@@ -64,7 +64,7 @@ import {
 	processInteractionUpdate,
 	type ToolCallState,
 } from "../src/providers/cursor-agent/index.js";
-import type { AssistantMessage, CursorExecHandlers, ToolResultMessage } from "../src/types.js";
+import type { AssistantMessage, CursorExecHandlers, CursorToolResultHandler, ToolResultMessage } from "../src/types.js";
 import { kCursorExecResolved, setStreamingPartialJson } from "../src/utils/cursor-agent-blocks.js";
 import { AssistantMessageEventStream } from "../src/utils/event-stream.js";
 
@@ -2213,5 +2213,195 @@ describe("Cursor exec server control", () => {
 		expect(frames[0].message.value.id).toBe(execMessage.id);
 		expect(frames[0].message.value.message.case).toBe("readResult");
 		expect((frames[0].message.value.message.value as any).result.case).toBe("error");
+	});
+});
+
+describe("Cursor exec hook abort", () => {
+	/** A hook that never settles: the abort race, not the hook, must end the exec. */
+	function hung(): Promise<never> {
+		return new Promise<never>(() => {});
+	}
+
+	function deferred(): { started: Promise<void>; markStarted: () => void } {
+		let markStarted!: () => void;
+		const started = new Promise<void>((resolve) => {
+			markStarted = resolve;
+		});
+		return { started, markStarted };
+	}
+
+	/**
+	 * Drive one exec frame whose named hook hangs, then abort it the way the
+	 * server would. Asserts the dispatch settles (terminal frame written,
+	 * controller released) instead of waiting on the hung hook forever.
+	 */
+	async function expectAbortEndsHungHook(
+		execMessage: ExecServerMessage,
+		options: {
+			execHandlers?: CursorExecHandlers;
+			onToolResult?: CursorToolResultHandler;
+			started: Promise<void>;
+		},
+	): Promise<AgentClientMessage[]> {
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState();
+		const written: Buffer[] = [];
+		const h2Request = {
+			write: (chunk: Buffer) => {
+				written.push(chunk);
+				return true;
+			},
+		} as unknown as Parameters<typeof handleServerMessage>[5];
+		const controllers = new Map<number, AbortController>();
+
+		const execPromise = handleServerMessage(
+			create(AgentServerMessageSchema, { message: { case: "execServerMessage", value: execMessage } }),
+			output,
+			stream,
+			state,
+			new Map(),
+			h2Request,
+			options.execHandlers,
+			options.onToolResult,
+			{ sawTokenDelta: false },
+			[],
+			undefined,
+			controllers,
+		);
+		await options.started;
+
+		await handleServerMessage(
+			create(AgentServerMessageSchema, {
+				message: {
+					case: "execServerControlMessage",
+					value: create(ExecServerControlMessageSchema, {
+						message: { case: "abort", value: create(ExecServerAbortSchema, { id: execMessage.id }) },
+					}),
+				},
+			}),
+			output,
+			stream,
+			state,
+			new Map(),
+			h2Request,
+			undefined,
+			undefined,
+			{ sawTokenDelta: false },
+			[],
+			undefined,
+			controllers,
+		);
+
+		await Promise.race([
+			execPromise,
+			new Promise<never>((_resolve, reject) =>
+				setTimeout(() => reject(new Error("hung hook kept the aborted exec open")), 2000),
+			),
+		]);
+		expect(controllers.size).toBe(0);
+		return written.map(decodeClientFrame);
+	}
+
+	function expectTerminalThrow(frames: AgentClientMessage[], execId: number): void {
+		const control = frames.filter((frame) => frame.message.case === "execClientControlMessage");
+		expect(control.length).toBeGreaterThan(0);
+		const cases = control.map((frame) =>
+			frame.message.case === "execClientControlMessage" ? frame.message.value.message.case : undefined,
+		);
+		expect(cases).toContain("throw");
+		const throwFrame = control[cases.indexOf("throw")];
+		if (throwFrame.message.case !== "execClientControlMessage") throw new Error("wrong frame");
+		if (throwFrame.message.value.message.case !== "throw") throw new Error("wrong control case");
+		expect(throwFrame.message.value.message.value.id).toBe(execId);
+		expect(throwFrame.message.value.message.value.error).toMatch(/aborted/i);
+	}
+
+	it("a hung onToolResult hook does not block the abort of a finished handler", async () => {
+		const { started, markStarted } = deferred();
+		const execMessage = buildExecMessage({
+			case: "readArgs",
+			value: create(ReadArgsSchema, { path: "ok.txt", toolCallId: "hook-hang" }),
+		});
+		const frames = await expectAbortEndsHungHook(execMessage, {
+			execHandlers: {
+				read: async () => toolResult("contents", { toolCallId: "hook-hang", toolName: "read" }),
+			},
+			onToolResult: (result) => {
+				markStarted();
+				void result;
+				return hung();
+			},
+			started,
+		});
+		expectTerminalThrow(frames, execMessage.id);
+	});
+
+	it("a hung mcpApprovalPreflight hook does not block the abort of an approval probe", async () => {
+		const { started, markStarted } = deferred();
+		const execMessage = buildExecMessage({
+			case: "mcpArgs",
+			value: create(McpArgsSchema, {
+				name: "deploy",
+				toolName: "deploy",
+				toolCallId: "c1",
+				providerIdentifier: "ops",
+				smartModeApprovalOnly: true,
+			}),
+		});
+		const frames = await expectAbortEndsHungHook(execMessage, {
+			execHandlers: {
+				mcpApprovalPreflight: () => {
+					markStarted();
+					return hung();
+				},
+			},
+			started,
+		});
+		expectTerminalThrow(frames, execMessage.id);
+	});
+
+	it("a hung listMcpResources hook does not block the abort of the listing", async () => {
+		const { started, markStarted } = deferred();
+		const execMessage = buildExecMessage({
+			case: "listMcpResourcesExecArgs",
+			value: create(ListMcpResourcesExecArgsSchema, {}),
+		});
+		const frames = await expectAbortEndsHungHook(execMessage, {
+			execHandlers: {
+				listMcpResources: () => {
+					markStarted();
+					return hung();
+				},
+			},
+			started,
+		});
+		// The listing error result is built from the abort before the terminal
+		// throw, so the server sees a typed failure, not silence.
+		const cases = frames.map((frame) =>
+			frame.message.case === "execClientMessage" ? frame.message.value.message.case : frame.message.case,
+		);
+		expect(cases).toContain("listMcpResourcesExecResult");
+	});
+
+	it("a hung readMcpResource hook does not block the abort of the read", async () => {
+		const { started, markStarted } = deferred();
+		const execMessage = buildExecMessage({
+			case: "readMcpResourceExecArgs",
+			value: create(ReadMcpResourceExecArgsSchema, { server: "docs", uri: "docs://readme" }),
+		});
+		const frames = await expectAbortEndsHungHook(execMessage, {
+			execHandlers: {
+				readMcpResource: () => {
+					markStarted();
+					return hung();
+				},
+			},
+			started,
+		});
+		const cases = frames.map((frame) =>
+			frame.message.case === "execClientMessage" ? frame.message.value.message.case : frame.message.case,
+		);
+		expect(cases).toContain("readMcpResourceExecResult");
 	});
 });

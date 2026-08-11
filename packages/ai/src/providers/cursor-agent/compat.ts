@@ -54,6 +54,17 @@ export function isKimiK3ModelId(modelId: string): boolean {
 	return /(?:^|[/:_-])kimi[-_]?k?3(?:$|[/:_-])/i.test(modelId);
 }
 
+/**
+ * Canonical logical-family key for Cursor's Kimi K3 routes. Cursor exposes one
+ * logical K3 model through sibling wire IDs per effort tier (kimi-k3-low /
+ * kimi-k3-high / kimi-k3-max); a turn persisted under any of them belongs to
+ * the same logical model, so replay compatibility compares this key rather
+ * than the exact route string. Non-K3 IDs pass through unchanged.
+ */
+export function canonicalKimiK3ModelId(modelId: string): string {
+	return isKimiK3ModelId(modelId) ? "kimi-k3" : modelId;
+}
+
 function isLocalOrMetadataHost(host: string): boolean {
 	const lowerHost = host.toLowerCase();
 	if (lowerHost === "localhost" || lowerHost.endsWith(".localhost") || lowerHost === "metadata.google.internal") {
