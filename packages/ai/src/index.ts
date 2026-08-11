@@ -40,6 +40,7 @@ export type {
 	OAuthSelectOption,
 	OAuthSelectPrompt,
 } from "./utils/oauth/types.js";
+export * from "./utils/openai-codex-usage.js";
 export * from "./utils/overflow.js";
 export * from "./utils/stream-failure.js";
 export * from "./utils/typebox-helpers.js";

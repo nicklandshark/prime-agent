@@ -13,6 +13,7 @@ export type StreamFailureKind =
 	| "safety"
 	| "overloaded"
 	| "rate_limit"
+	| "quota"
 	| "server_error"
 	| "auth"
 	| "invalid_request"
@@ -44,6 +45,7 @@ const KIND_MESSAGES: Record<StreamFailureKind, string> = {
 	safety: "Response blocked by provider safety filters",
 	overloaded: "Provider overloaded",
 	rate_limit: "Provider rate limit exceeded",
+	quota: "Subscription usage limit reached",
 	server_error: "Provider server error",
 	auth: "Provider authentication failed",
 	invalid_request: "Provider rejected the request",
@@ -70,6 +72,9 @@ export function classifyStreamFailure(providerErrorType?: string, status?: numbe
 		return "safety";
 	}
 	if (type.includes("overloaded") || status === 529) return "overloaded";
+	// Subscription quota exhaustion (ChatGPT usage windows) is distinct from a
+	// transient rate limit: retrying the same account cannot help.
+	if (type === "usage_limit_reached" || type === "usage_not_included") return "quota";
 	if (type.includes("rate_limit") || type.includes("throttl") || status === 429) return "rate_limit";
 	if (/authentication|permission|unauthorized/.test(type) || status === 401 || status === 403) return "auth";
 	if (type.includes("invalid_request") || type.includes("not_found_error") || status === 400 || status === 404) {

@@ -28,7 +28,8 @@ import { type Static, type TProperties, Type } from "typebox";
 import type { Validator } from "typebox/compile";
 import type { TLocalizedValidationError } from "typebox/error";
 import { getAgentDir } from "../config.js";
-import type { AuthSourceToken, AuthStatus, AuthStorage } from "./auth-storage.js";
+import { type AuthSourceToken, type AuthStatus, type AuthStorage, OPENAI_CODEX_PROVIDER_ID } from "./auth-storage.js";
+import { OpenAICodexAccountManager } from "./openai-codex-account-manager.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "./prime-inference-auth.js";
 import {
 	fetchAuthorizedPrivatePrimeInferenceModelIds,
@@ -268,6 +269,10 @@ export type ResolvedRequestAuth =
 			ok: true;
 			apiKey?: string;
 			headers?: Record<string, string>;
+			/** ChatGPT account the apiKey belongs to (openai-codex only). */
+			accountId?: string;
+			/** Display label of the account (openai-codex only). */
+			accountLabel?: string;
 	  }
 	| {
 			ok: false;
@@ -451,10 +456,14 @@ export class ModelRegistry {
 	/** Re-register dynamic OAuth providers (e.g. user MCP servers) after refresh() resets the registry. */
 	private onOAuthProvidersReset?: () => void;
 
+	/** Pool of stored ChatGPT subscriptions for openai-codex (selection, usage, auto-switch). */
+	readonly openAICodexAccounts: OpenAICodexAccountManager;
+
 	private constructor(
 		readonly authStorage: AuthStorage,
 		private modelsJsonPath: string | undefined,
 	) {
+		this.openAICodexAccounts = new OpenAICodexAccountManager(authStorage);
 		this.loadModels();
 	}
 
@@ -485,6 +494,7 @@ export class ModelRegistry {
 		// Credentials may have been written by another process (e.g. the UI
 		// process saving a login while the session lives in the daemon).
 		this.authStorage.reload();
+		this.openAICodexAccounts.syncFromStorage();
 
 		// Ensure dynamic API/OAuth registrations are rebuilt from current provider state.
 		resetApiProviders();
@@ -1354,10 +1364,24 @@ export class ModelRegistry {
 				headers = { ...headers, Authorization: `Bearer ${apiKey}` };
 			}
 
+			// Attribute the resolved credential to a pooled ChatGPT account so
+			// usage headers and usage-limit recovery target the right account.
+			let accountId: string | undefined;
+			let accountLabel: string | undefined;
+			if (model.provider === OPENAI_CODEX_PROVIDER_ID && apiKey !== undefined) {
+				const activeAccount = this.authStorage.getActiveOpenAICodexAccount();
+				if (activeAccount) {
+					accountId = activeAccount.accountId;
+					accountLabel = activeAccount.label ?? activeAccount.email ?? activeAccount.accountId;
+				}
+			}
+
 			return {
 				ok: true,
 				apiKey,
 				headers: headers && Object.keys(headers).length > 0 ? headers : undefined,
+				...(accountId !== undefined ? { accountId } : {}),
+				...(accountLabel !== undefined ? { accountLabel } : {}),
 			};
 		} catch (error) {
 			return {

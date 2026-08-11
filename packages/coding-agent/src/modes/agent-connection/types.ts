@@ -586,6 +586,13 @@ export type AgentConnectionSessionEvent =
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
 	| { type: "auth_stale"; provider: string; sourceTokens?: readonly AuthSourceToken[] }
+	| {
+			type: "oauth_account_changed";
+			provider: "openai-codex";
+			accountId: string;
+			label: string;
+			reason: "manual" | "usage_limit";
+	  }
 	| { type: "rlm_child_update"; child: AgentConnectionRlmChildAgentSnapshot }
 	| { type: "recap_update"; recap: string | undefined }
 	| { type: "goal_update"; goal: GoalState }

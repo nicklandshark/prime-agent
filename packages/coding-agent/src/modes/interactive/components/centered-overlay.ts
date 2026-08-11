@@ -19,6 +19,23 @@ interface InputHandler {
 	handleInput(data: string): void;
 }
 
+/** Zero-based screen rectangle occupied by centered overlay content. */
+export interface ScreenBounds {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+}
+
+/** Components that want their centered content bounds (e.g. for mouse hit-testing). */
+export interface ScreenBoundsAware {
+	setScreenBounds(bounds: ScreenBounds): void;
+}
+
+function isScreenBoundsAware(component: Component): component is Component & ScreenBoundsAware {
+	return typeof (component as { setScreenBounds?: unknown }).setScreenBounds === "function";
+}
+
 export interface FullPaneOverlayOptions {
 	maxContentWidth?: number;
 	fullWidth?: boolean;
@@ -103,6 +120,12 @@ export class CenteredOverlayComponent implements Component, Focusable {
 		const centeredTop = Math.floor((targetRows - contentLines.length) / 2) + (this.options.verticalOffset ?? 0);
 		const topPadding = Math.max(0, Math.min(centeredTop, targetRows - contentLines.length));
 		const bottomPadding = Math.max(0, targetRows - contentLines.length - topPadding);
+
+		// The overlay is pinned at row 0 / col 0, so zero-based offsets within the
+		// rendered frame are already zero-based screen coordinates.
+		if (isScreenBoundsAware(this.component)) {
+			this.component.setScreenBounds({ x: left, y: topPadding, width: contentWidth, height: contentLines.length });
+		}
 
 		return [
 			...Array.from({ length: topPadding }, () => this.blank(safeWidth)),

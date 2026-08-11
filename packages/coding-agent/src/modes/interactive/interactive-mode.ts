@@ -202,6 +202,10 @@ import { HeartbeatManagerComponent } from "./components/heartbeat-manager.js";
 import { InjectedPromptMessageComponent, isInjectedPromptMessage } from "./components/injected-prompt-message.js";
 import { formatKeyText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.js";
 import type { AuthSelectorProvider } from "./components/oauth-selector.js";
+import {
+	getOpenAICodexAccountDisplayLabel,
+	getOpenAICodexAccountManager,
+} from "./components/openai-codex-account-selector.js";
 import { PrimeOnboardingSplashComponent } from "./components/prime-onboarding-splash.js";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.js";
 import { SettingsSelectorComponent } from "./components/settings-selector.js";
@@ -711,6 +715,17 @@ export function updateArgsIncludeSelf(args: readonly string[]): boolean {
 	}
 	const normalized = positional.toLowerCase();
 	return normalized === "self" || normalized === "pi" || normalized === APP_NAME.toLowerCase();
+}
+
+/** Active openai-codex account label for the tray. */
+function getActiveOpenAICodexAccountLabel(modelRegistry: unknown): string | undefined {
+	try {
+		const manager = getOpenAICodexAccountManager(modelRegistry);
+		const active = manager?.getCachedAccounts().find((account) => account.active);
+		return active ? getOpenAICodexAccountDisplayLabel(active) : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 function argsIncludeSessionSelection(args: readonly string[]): boolean {
@@ -2702,6 +2717,14 @@ export class InteractiveMode {
 		}
 		this.footer.invalidate();
 		this.updateEditorBorderColor();
+	}
+
+	/** An openai-codex account switch changed which credential and models apply. */
+	private handleOAuthAccountChanged(): void {
+		this.modelRegistry.authStorage.reload();
+		this.footer.invalidate();
+		this.updateEditorBorderColor();
+		void this.refreshConnectionModelsAfterAuthChange().catch(() => undefined);
 	}
 
 	private getCurrentModel(): AgentConnectionModel | undefined {
@@ -5277,6 +5300,11 @@ export class InteractiveMode {
 
 		this.footer.invalidate();
 		this.updateConnectionStateFromEvent(event);
+		// openai-codex account switches are emitted by the core account manager
+		// (manual selection in /login or automatic usage-limit failover).
+		if (event.type === "oauth_account_changed") {
+			this.handleOAuthAccountChanged();
+		}
 		// A new user message resets the activity tracker to 0, so the in-flight baseline must
 		// reset with it. (agent_start on auto-retry does not reset the tracker.)
 		if (event.type === "message_start") {
@@ -5997,7 +6025,9 @@ export class InteractiveMode {
 		if (!model) {
 			return "—";
 		}
-		const parts = [model.name];
+		const accountLabel =
+			model.provider === "openai-codex" ? getActiveOpenAICodexAccountLabel(this.modelRegistry) : undefined;
+		const parts = [accountLabel ? `${model.name} (${accountLabel})` : model.name];
 		if (model.reasoning) {
 			const level = this.connectionState?.thinkingLevel ?? "off";
 			if (level !== "off") {

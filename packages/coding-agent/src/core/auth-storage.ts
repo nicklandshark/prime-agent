@@ -14,7 +14,12 @@ import {
 	type OAuthLoginCallbacks,
 	type OAuthProviderId,
 } from "@earendil-works/pi-ai";
-import { getOAuthApiKey, getOAuthProvider, getOAuthProviders } from "@earendil-works/pi-ai/oauth";
+import {
+	extractOpenAICodexIdentity,
+	getOAuthApiKey,
+	getOAuthProvider,
+	getOAuthProviders,
+} from "@earendil-works/pi-ai/oauth";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
@@ -45,11 +50,51 @@ export type ApiKeyCredential = {
 	primeTeam?: PrimeTeamCredential | null;
 };
 
+/**
+ * One stored ChatGPT subscription. `accountId` is the ChatGPT account id from
+ * the access token's "https://api.openai.com/auth" claim; legacy credentials
+ * without a derivable id are keyed by a stable credential hash instead.
+ */
+export interface OpenAICodexOAuthAccount extends OAuthCredentials {
+	accountId: string;
+	email?: string;
+	label?: string;
+}
+
+/**
+ * Pool of stored ChatGPT subscriptions embedded beneath the provider's
+ * top-level OAuth credential. The top-level access/refresh/expires/
+ * accountId/email/label fields always mirror the active account so existing
+ * consumers that only know `type === "oauth"` keep working.
+ *
+ * KNOWN RISK (accepted, documented): binaries from before the pool feature
+ * discard the accountPool field when they rewrite auth.json, dropping pooled
+ * accounts. Downgrading while multiple subscriptions are stored is not
+ * supported.
+ */
+export interface OpenAICodexAccountPool {
+	schemaVersion: 1;
+	activeAccountId: string;
+	accounts: Record<string, OpenAICodexOAuthAccount>;
+}
+
+/**
+ * Point-in-time view of the openai-codex account pool, read atomically under
+ * the auth file lock (see AuthStorage.snapshotOpenAICodexPool).
+ */
+export interface OpenAICodexPoolSnapshot {
+	accounts: OpenAICodexOAuthAccount[];
+	activeAccountId?: string;
+}
+
 export type OAuthCredential = {
 	type: "oauth";
+	accountPool?: OpenAICodexAccountPool;
 } & OAuthCredentials;
 
 export type AuthCredential = ApiKeyCredential | OAuthCredential;
+
+export const OPENAI_CODEX_PROVIDER_ID = "openai-codex";
 
 export type AuthStorageData = Record<string, AuthCredential>;
 
@@ -241,6 +286,163 @@ export class InMemoryAuthStorageBackend implements AuthStorageBackend {
 	}
 }
 
+// ============================================================================
+// OpenAI Codex account pool helpers
+// ============================================================================
+
+function isValidOpenAICodexAccount(value: unknown): value is OpenAICodexOAuthAccount {
+	if (!value || typeof value !== "object") return false;
+	const account = value as OpenAICodexOAuthAccount;
+	return (
+		typeof account.accountId === "string" &&
+		account.accountId.length > 0 &&
+		typeof account.access === "string" &&
+		typeof account.refresh === "string" &&
+		typeof account.expires === "number"
+	);
+}
+
+function getValidOpenAICodexPool(credential: OAuthCredential): OpenAICodexAccountPool | undefined {
+	const pool = credential.accountPool;
+	if (!pool || pool.schemaVersion !== 1 || !pool.accounts || typeof pool.accounts !== "object") {
+		return undefined;
+	}
+	if (typeof pool.activeAccountId !== "string" || !isValidOpenAICodexAccount(pool.accounts[pool.activeAccountId])) {
+		return undefined;
+	}
+	return pool;
+}
+
+/**
+ * Derive the pool key for a credential: the stored/JWT account id when
+ * available, otherwise a stable hash of the credential material so a legacy
+ * account keeps its identity across reloads and refreshes.
+ */
+export function deriveOpenAICodexAccountId(credential: OAuthCredentials): string {
+	if (typeof credential.accountId === "string" && credential.accountId.length > 0) {
+		return credential.accountId;
+	}
+	const identity = extractOpenAICodexIdentity(credential.access);
+	if (identity.accountId) {
+		return identity.accountId;
+	}
+	const digest = createHash("sha256")
+		.update(credential.refresh || credential.access)
+		.digest("hex")
+		.slice(0, 16);
+	return `legacy-${digest}`;
+}
+
+function readStringField(value: unknown): string | undefined {
+	return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function toOpenAICodexAccount(credential: OAuthCredential): OpenAICodexOAuthAccount {
+	const accountId = deriveOpenAICodexAccountId(credential);
+	const identity = extractOpenAICodexIdentity(credential.access);
+	const account: OpenAICodexOAuthAccount = {
+		...credential,
+		accountId,
+	};
+	// Pool envelope fields belong to the outer credential, not the account.
+	delete (account as { type?: unknown }).type;
+	delete (account as { accountPool?: unknown }).accountPool;
+	const email = readStringField(credential.email) ?? identity.email;
+	if (email) account.email = email;
+	else delete account.email;
+	const label = readStringField(credential.label);
+	if (label) account.label = label;
+	else delete account.label;
+	return account;
+}
+
+/** Mirror the pool's active account onto the top-level credential fields. */
+function mirrorOpenAICodexActiveAccount(credential: OAuthCredential, pool: OpenAICodexAccountPool): OAuthCredential {
+	const active = pool.accounts[pool.activeAccountId];
+	if (!active) return credential;
+	const mirrored: OAuthCredential = {
+		...credential,
+		access: active.access,
+		refresh: active.refresh,
+		expires: active.expires,
+		accountId: active.accountId,
+		accountPool: pool,
+	};
+	if (active.email !== undefined) mirrored.email = active.email;
+	else delete mirrored.email;
+	if (active.label !== undefined) mirrored.label = active.label;
+	else delete mirrored.label;
+	return mirrored;
+}
+
+/**
+ * The only repair that is safe to apply to a malformed pool: re-pointing a
+ * broken activeAccountId at an existing valid account. Anything else (unknown
+ * schemaVersion, missing/non-object accounts map, no salvageable account) is
+ * left untouched so nested credentials survive for a future reader that
+ * understands the shape.
+ */
+function repairOpenAICodexPool(pool: unknown): OpenAICodexAccountPool | undefined {
+	if (!pool || typeof pool !== "object") {
+		return undefined;
+	}
+	const candidate = pool as OpenAICodexAccountPool;
+	if (candidate.schemaVersion !== 1 || !candidate.accounts || typeof candidate.accounts !== "object") {
+		return undefined;
+	}
+	const firstValid = Object.values(candidate.accounts).find(isValidOpenAICodexAccount);
+	if (!firstValid) {
+		return undefined;
+	}
+	return { schemaVersion: 1, activeAccountId: firstValid.accountId, accounts: candidate.accounts };
+}
+
+/**
+ * Migrate a legacy single-account openai-codex credential (accountPool
+ * ABSENT) into a one-account pool and repair the active-account mirror on
+ * already-pooled credentials. A present-but-malformed accountPool is
+ * preserved: it is only rewritten when it can be repaired without dropping
+ * accounts, so a destructive single-account rebuild never wipes nested
+ * refresh tokens. Returns the same object reference when no change was needed.
+ */
+function migrateOpenAICodexCredential(credential: OAuthCredential): { credential: OAuthCredential; migrated: boolean } {
+	const existingPool = credential.accountPool !== undefined;
+	const pool = getValidOpenAICodexPool(credential);
+	if (!pool) {
+		if (existingPool) {
+			// Present but malformed: repair only when safely possible; otherwise
+			// leave the credential (and its pool) completely untouched.
+			const repaired = repairOpenAICodexPool(credential.accountPool);
+			if (!repaired) {
+				return { credential, migrated: false };
+			}
+			return { credential: mirrorOpenAICodexActiveAccount({ ...credential }, repaired), migrated: true };
+		}
+		// Legacy credential: rebuild a single fallback account from the
+		// top-level fields.
+		const account = toOpenAICodexAccount(credential);
+		const rebuilt: OpenAICodexAccountPool = {
+			schemaVersion: 1,
+			activeAccountId: account.accountId,
+			accounts: { [account.accountId]: account },
+		};
+		return { credential: mirrorOpenAICodexActiveAccount({ ...credential }, rebuilt), migrated: true };
+	}
+	const mirrored = mirrorOpenAICodexActiveAccount(credential, pool);
+	const mirrorChanged =
+		mirrored.access !== credential.access ||
+		mirrored.refresh !== credential.refresh ||
+		mirrored.expires !== credential.expires ||
+		mirrored.accountId !== credential.accountId ||
+		mirrored.email !== credential.email ||
+		mirrored.label !== credential.label;
+	return { credential: mirrored, migrated: !existingPool || mirrorChanged };
+}
+
+// ============================================================================
+// Credential storage
+// ============================================================================
+
 /**
  * Credential storage backed by a JSON file.
  */
@@ -400,7 +602,16 @@ export class AuthStorage {
 			return undefined;
 		}
 		const isCommandApiKey = credential.type === "api_key" && credential.key.startsWith("!");
-		const identityMaterial = isCommandApiKey ? `api_key:command:${credential.key}` : `${provider}:${credential.type}`;
+		let identityMaterial = isCommandApiKey ? `api_key:command:${credential.key}` : `${provider}:${credential.type}`;
+		if (provider === OPENAI_CODEX_PROVIDER_ID && credential.type === "oauth") {
+			// Staleness is per-account: marking one pooled account stale must not
+			// poison the credential identity of the other stored accounts.
+			const accountId =
+				credential.accountPool?.activeAccountId ?? readStringField(credential.accountId) ?? undefined;
+			if (accountId) {
+				identityMaterial += `:${accountId}`;
+			}
+		}
 		const commandValueMaterial =
 			isCommandApiKey && options?.resolvedCommandValue !== undefined
 				? `api_key:command:${credential.key}\0${options.resolvedCommandValue}`
@@ -616,23 +827,45 @@ export class AuthStorage {
 	}
 
 	private parseStorageData(content: string | undefined): AuthStorageData {
+		return this.parseStorageDataMigrating(content).data;
+	}
+
+	/**
+	 * Parse the stored payload, migrating legacy single-account openai-codex
+	 * credentials into a one-account pool. Pure aside from the migration flag;
+	 * callers persist `data` under the lock they already hold when `migrated`.
+	 */
+	private parseStorageDataMigrating(content: string | undefined): { data: AuthStorageData; migrated: boolean } {
 		if (!content) {
-			return {};
+			return { data: {}, migrated: false };
 		}
-		return JSON.parse(content) as AuthStorageData;
+		const parsed = JSON.parse(content) as AuthStorageData;
+		let migrated = false;
+		for (const [provider, credential] of Object.entries(parsed)) {
+			if (provider !== OPENAI_CODEX_PROVIDER_ID || credential?.type !== "oauth") {
+				continue;
+			}
+			const result = migrateOpenAICodexCredential(credential);
+			if (result.migrated) {
+				parsed[provider] = result.credential;
+				migrated = true;
+			}
+		}
+		return { data: parsed, migrated };
 	}
 
 	/**
 	 * Reload credentials from storage.
 	 */
 	reload(): void {
-		let content: string | undefined;
 		try {
 			this.storage.withLock((current) => {
-				content = current;
-				return { result: undefined };
+				const { data, migrated } = this.parseStorageDataMigrating(current);
+				this.data = data;
+				// Persist the pool migration under the same lock so subsequent
+				// readers (including other processes) see the canonical shape.
+				return { result: undefined, next: migrated ? JSON.stringify(data, null, 2) : undefined };
 			});
-			this.data = this.parseStorageData(content);
 			this.loadError = null;
 		} catch (error) {
 			this.loadError = error as Error;
@@ -670,8 +903,23 @@ export class AuthStorage {
 
 	/**
 	 * Set credential for a provider.
+	 *
+	 * For openai-codex, an unpooled OAuth credential upserts into the existing
+	 * account pool (keyed by account id) instead of replacing it, so direct
+	 * callers cannot silently drop other stored accounts.
 	 */
 	set(provider: string, credential: AuthCredential): void {
+		if (
+			provider === OPENAI_CODEX_PROVIDER_ID &&
+			credential.type === "oauth" &&
+			credential.accountPool === undefined
+		) {
+			const existing = this.getOpenAICodexPoolFromData(this.data);
+			if (existing) {
+				this.upsertOpenAICodexAccount(credential);
+				return;
+			}
+		}
 		this.clearStaleAuthSource(provider, "stored");
 		this.data[provider] = credential;
 		this.persistProviderChange(provider, credential);
@@ -730,6 +978,10 @@ export class AuthStorage {
 
 	/**
 	 * Login to an OAuth provider.
+	 *
+	 * For openai-codex the new account is upserted into the stored account pool
+	 * (keyed by ChatGPT account id) instead of replacing the credential, so
+	 * re-login or adding a second subscription preserves the other accounts.
 	 */
 	async login(providerId: OAuthProviderId, callbacks: OAuthLoginCallbacks): Promise<void> {
 		const provider = getOAuthProvider(providerId);
@@ -738,7 +990,337 @@ export class AuthStorage {
 		}
 
 		const credentials = await provider.login(callbacks);
+		if (providerId === OPENAI_CODEX_PROVIDER_ID) {
+			this.upsertOpenAICodexAccount(credentials);
+			return;
+		}
 		this.set(providerId, { type: "oauth", ...credentials });
+	}
+
+	// =========================================================================
+	// OpenAI Codex account pool
+	// =========================================================================
+
+	private getOpenAICodexPoolFromData(
+		data: AuthStorageData,
+	): { credential: OAuthCredential; pool: OpenAICodexAccountPool } | undefined {
+		const credential = data[OPENAI_CODEX_PROVIDER_ID];
+		if (credential?.type !== "oauth") {
+			return undefined;
+		}
+		// data has been through parseStorageData, so legacy credentials are
+		// migrated and salvageable pools are repaired.
+		const pool = getValidOpenAICodexPool(credential);
+		if (pool) {
+			return { credential, pool };
+		}
+		if (credential.accountPool !== undefined) {
+			// The pool is present but malformed and unsalvageable. It is
+			// deliberately left untouched on disk; for reads, fall back to the
+			// top-level mirror as a synthesized single-account pool (never
+			// persisted — write paths operate on the validated on-disk pool).
+			const mirror = toOpenAICodexAccount(credential);
+			if (!isValidOpenAICodexAccount(mirror)) {
+				return undefined;
+			}
+			return {
+				credential,
+				pool: { schemaVersion: 1, activeAccountId: mirror.accountId, accounts: { [mirror.accountId]: mirror } },
+			};
+		}
+		return undefined;
+	}
+
+	/**
+	 * List all stored ChatGPT subscription accounts (pool order = insertion order).
+	 */
+	listOpenAICodexAccounts(): OpenAICodexOAuthAccount[] {
+		const entry = this.getOpenAICodexPoolFromData(this.data);
+		if (!entry) {
+			return [];
+		}
+		return Object.values(entry.pool.accounts).filter(isValidOpenAICodexAccount);
+	}
+
+	/**
+	 * Atomically re-read auth.json under the file lock and return the current
+	 * openai-codex pool (accounts + active account id). Unlike the cached
+	 * getters, this observes writes made by other processes, so multi-daemon
+	 * failover lists/probes the subscriptions that are stored NOW. The
+	 * in-memory cache is refreshed as a side effect. Returns undefined when
+	 * storage cannot be read; callers should fall back to the cached getters.
+	 */
+	snapshotOpenAICodexPool(): OpenAICodexPoolSnapshot | undefined {
+		try {
+			return this.storage.withLock((current) => {
+				const { data, migrated } = this.parseStorageDataMigrating(current);
+				this.data = data;
+				this.loadError = null;
+				const entry = this.getOpenAICodexPoolFromData(data);
+				const snapshot: OpenAICodexPoolSnapshot = entry
+					? {
+							accounts: Object.values(entry.pool.accounts).filter(isValidOpenAICodexAccount),
+							...(entry.pool.activeAccountId !== undefined
+								? { activeAccountId: entry.pool.activeAccountId }
+								: {}),
+						}
+					: { accounts: [] };
+				return { result: snapshot, next: migrated ? JSON.stringify(data, null, 2) : undefined };
+			});
+		} catch (error) {
+			this.recordError(error);
+			return undefined;
+		}
+	}
+
+	/**
+	 * The currently active ChatGPT subscription account.
+	 */
+	getActiveOpenAICodexAccount(): OpenAICodexOAuthAccount | undefined {
+		const entry = this.getOpenAICodexPoolFromData(this.data);
+		if (!entry) {
+			return undefined;
+		}
+		return entry.pool.accounts[entry.pool.activeAccountId];
+	}
+
+	/**
+	 * Upsert an account into the openai-codex pool and make it active.
+	 * Existing metadata (label, email) is preserved when the incoming
+	 * credentials don't carry it.
+	 */
+	upsertOpenAICodexAccount(credentials: OAuthCredentials): OpenAICodexOAuthAccount {
+		const incoming = toOpenAICodexAccount({ type: "oauth", ...credentials });
+		try {
+			const stored = this.storage.withLock((current) => {
+				const { data } = this.parseStorageDataMigrating(current);
+				const existing = data[OPENAI_CODEX_PROVIDER_ID];
+				const existingPool = existing?.type === "oauth" ? getValidOpenAICodexPool(existing) : undefined;
+				if (existing?.type === "oauth" && existing.accountPool !== undefined && !existingPool) {
+					// The stored pool is malformed and could not be safely repaired.
+					// Refuse to replace it: upserting would silently drop the nested
+					// accounts it still holds.
+					throw new Error(
+						"Refusing to update the openai-codex account pool: the stored pool is malformed. Repair or remove it in auth.json first.",
+					);
+				}
+				const previous = existingPool?.accounts[incoming.accountId];
+				const account: OpenAICodexOAuthAccount = {
+					...previous,
+					...incoming,
+					accountId: incoming.accountId,
+				};
+				const email = incoming.email ?? previous?.email;
+				if (email) account.email = email;
+				else delete account.email;
+				const label = incoming.label ?? previous?.label;
+				if (label) account.label = label;
+				else delete account.label;
+
+				const pool: OpenAICodexAccountPool = existingPool
+					? {
+							schemaVersion: 1,
+							activeAccountId: incoming.accountId,
+							accounts: { ...existingPool.accounts, [incoming.accountId]: account },
+						}
+					: { schemaVersion: 1, activeAccountId: incoming.accountId, accounts: { [incoming.accountId]: account } };
+				const base: OAuthCredential =
+					existing?.type === "oauth" ? existing : ({ type: "oauth", ...credentials } as OAuthCredential);
+				const nextCredential = mirrorOpenAICodexActiveAccount({ ...base, type: "oauth" }, pool);
+				const merged: AuthStorageData = { ...data, [OPENAI_CODEX_PROVIDER_ID]: nextCredential };
+				this.data = merged;
+				return { result: account, next: JSON.stringify(merged, null, 2) };
+			});
+			this.clearStaleAuthSource(OPENAI_CODEX_PROVIDER_ID, "stored");
+			return stored;
+		} catch (error) {
+			this.recordError(error);
+			throw error;
+		}
+	}
+
+	/**
+	 * Switch the active ChatGPT subscription account. Returns the activated
+	 * account, or undefined when the account is unknown or storage fails.
+	 */
+	setActiveOpenAICodexAccount(accountId: string): OpenAICodexOAuthAccount | undefined {
+		return this.switchOpenAICodexAccount({ nextAccountId: accountId })?.account;
+	}
+
+	/**
+	 * Compare-and-set the active account under the auth file lock. When the
+	 * current active account no longer equals `expectedAccountId`, another
+	 * process already switched; the current active account is returned with
+	 * `switched: false` and no write is made.
+	 */
+	compareAndSetActiveOpenAICodexAccount(
+		expectedAccountId: string,
+		nextAccountId: string,
+	): { account: OpenAICodexOAuthAccount; switched: boolean } | undefined {
+		return this.switchOpenAICodexAccount({ nextAccountId, expectedAccountId });
+	}
+
+	private switchOpenAICodexAccount(args: {
+		nextAccountId: string;
+		expectedAccountId?: string;
+	}): { account: OpenAICodexOAuthAccount; switched: boolean } | undefined {
+		type SwitchResult = { account: OpenAICodexOAuthAccount; switched: boolean } | undefined;
+		try {
+			return this.storage.withLock((current): LockResult<SwitchResult> => {
+				const { data, migrated } = this.parseStorageDataMigrating(current);
+				const credential = data[OPENAI_CODEX_PROVIDER_ID];
+				if (credential?.type !== "oauth") {
+					return { result: undefined };
+				}
+				const pool = getValidOpenAICodexPool(credential);
+				if (!pool) {
+					return { result: undefined };
+				}
+
+				if (args.expectedAccountId !== undefined && pool.activeAccountId !== args.expectedAccountId) {
+					const current_active = pool.accounts[pool.activeAccountId];
+					if (!current_active) {
+						return { result: undefined };
+					}
+					if (migrated) {
+						this.data = data;
+					}
+					return {
+						result: { account: current_active, switched: false },
+						next: migrated ? JSON.stringify(data, null, 2) : undefined,
+					};
+				}
+
+				const nextAccount = pool.accounts[args.nextAccountId];
+				if (!nextAccount) {
+					return { result: undefined };
+				}
+				if (pool.activeAccountId === args.nextAccountId && !migrated) {
+					this.data = data;
+					return { result: { account: nextAccount, switched: true } };
+				}
+
+				const nextPool: OpenAICodexAccountPool = { ...pool, activeAccountId: args.nextAccountId };
+				const nextCredential = mirrorOpenAICodexActiveAccount({ ...credential }, nextPool);
+				const merged: AuthStorageData = { ...data, [OPENAI_CODEX_PROVIDER_ID]: nextCredential };
+				this.data = merged;
+				this.clearStaleAuthSource(OPENAI_CODEX_PROVIDER_ID, "stored");
+				return { result: { account: nextAccount, switched: true }, next: JSON.stringify(merged, null, 2) };
+			});
+		} catch (error) {
+			this.recordError(error);
+			return undefined;
+		}
+	}
+
+	/**
+	 * Resolve a usable access token for a specific pooled account, refreshing
+	 * it under the auth file lock when expired. Only the matching account is
+	 * updated; other accounts and their email/label metadata are preserved.
+	 * Returns undefined when the account is unknown or refresh fails.
+	 */
+	async getOpenAICodexAccountApiKey(
+		accountId: string,
+	): Promise<{ apiKey: string; account: OpenAICodexOAuthAccount } | undefined> {
+		const provider = getOAuthProvider(OPENAI_CODEX_PROVIDER_ID);
+		if (!provider) {
+			return undefined;
+		}
+		try {
+			const result = await this.storage.withLockAsync(async (current) => {
+				const { data } = this.parseStorageDataMigrating(current);
+				this.data = data;
+				this.loadError = null;
+
+				const credential = data[OPENAI_CODEX_PROVIDER_ID];
+				if (credential?.type !== "oauth") {
+					return { result: null };
+				}
+				const pool = getValidOpenAICodexPool(credential);
+				if (!pool) {
+					// Malformed pool (present but unsalvageable): serve the
+					// top-level mirror while it is unexpired, but never refresh —
+					// the rotated tokens could not be persisted back into the
+					// broken pool and the account would be lost.
+					if (credential.accountPool !== undefined) {
+						const mirror = toOpenAICodexAccount(credential);
+						if (
+							isValidOpenAICodexAccount(mirror) &&
+							mirror.accountId === accountId &&
+							Date.now() < mirror.expires
+						) {
+							return { result: { apiKey: provider.getApiKey(mirror), account: mirror } };
+						}
+					}
+					return { result: null };
+				}
+				const account = pool.accounts[accountId];
+				if (!account) {
+					return { result: null };
+				}
+
+				if (Date.now() < account.expires) {
+					// Best-effort email backfill for accounts stored before the email
+					// claim was reliably decoded: persist it on next successful use
+					// so the UI can label the account by email.
+					if (account.email === undefined) {
+						const identityEmail = extractOpenAICodexIdentity(account.access).email;
+						if (identityEmail) {
+							const backfilled: OpenAICodexOAuthAccount = { ...account, email: identityEmail };
+							const backfillPool: OpenAICodexAccountPool = {
+								...pool,
+								accounts: { ...pool.accounts, [accountId]: backfilled },
+							};
+							const backfillCredential = mirrorOpenAICodexActiveAccount({ ...credential }, backfillPool);
+							const backfillMerged: AuthStorageData = {
+								...data,
+								[OPENAI_CODEX_PROVIDER_ID]: backfillCredential,
+							};
+							this.data = backfillMerged;
+							return {
+								result: { apiKey: provider.getApiKey(backfilled), account: backfilled },
+								next: JSON.stringify(backfillMerged, null, 2),
+							};
+						}
+					}
+					return { result: { apiKey: provider.getApiKey(account), account } };
+				}
+
+				const refreshed = await provider.refreshToken(account);
+				const nextAccount: OpenAICodexOAuthAccount = {
+					...account,
+					...refreshed,
+					accountId: account.accountId,
+				};
+				const email = readStringField(refreshed.email) ?? account.email;
+				if (email) nextAccount.email = email;
+				else delete nextAccount.email;
+				if (account.label !== undefined) nextAccount.label = account.label;
+
+				const nextPool: OpenAICodexAccountPool = {
+					...pool,
+					accounts: { ...pool.accounts, [accountId]: nextAccount },
+				};
+				const nextCredential = mirrorOpenAICodexActiveAccount({ ...credential }, nextPool);
+				const merged: AuthStorageData = { ...data, [OPENAI_CODEX_PROVIDER_ID]: nextCredential };
+				this.data = merged;
+				this.loadError = null;
+				return {
+					result: { apiKey: provider.getApiKey(nextAccount), account: nextAccount },
+					next: JSON.stringify(merged, null, 2),
+				};
+			});
+			return result ?? undefined;
+		} catch (error) {
+			this.recordError(error);
+			// Re-read in case another instance refreshed successfully.
+			this.reload();
+			const account = this.getOpenAICodexPoolFromData(this.data)?.pool.accounts[accountId];
+			if (account && Date.now() < account.expires) {
+				return { apiKey: provider.getApiKey(account), account };
+			}
+			return undefined;
+		}
 	}
 
 	/**
@@ -777,6 +1359,41 @@ export class AuthStorage {
 			const cred = currentData[providerId];
 			if (cred?.type !== "oauth") {
 				return { result: null };
+			}
+
+			if (providerId === OPENAI_CODEX_PROVIDER_ID) {
+				// Pool-aware refresh: only the active account is refreshed; other
+				// accounts and their email/label metadata are preserved.
+				const pool = getValidOpenAICodexPool(cred);
+				const active = pool?.accounts[pool.activeAccountId];
+				if (!pool || !active) {
+					return { result: null };
+				}
+				if (Date.now() < active.expires) {
+					return { result: { apiKey: provider.getApiKey(active), newCredentials: active } };
+				}
+				const refreshedCredentials = await provider.refreshToken(active);
+				const nextAccount: OpenAICodexOAuthAccount = {
+					...active,
+					...refreshedCredentials,
+					accountId: active.accountId,
+				};
+				const email = readStringField(refreshedCredentials.email) ?? active.email;
+				if (email) nextAccount.email = email;
+				else delete nextAccount.email;
+				if (active.label !== undefined) nextAccount.label = active.label;
+				const nextPool: OpenAICodexAccountPool = {
+					...pool,
+					accounts: { ...pool.accounts, [active.accountId]: nextAccount },
+				};
+				const nextCredential = mirrorOpenAICodexActiveAccount({ ...cred }, nextPool);
+				const pooledMerge: AuthStorageData = { ...currentData, [providerId]: nextCredential };
+				this.data = pooledMerge;
+				this.loadError = null;
+				return {
+					result: { apiKey: provider.getApiKey(nextAccount), newCredentials: nextAccount },
+					next: JSON.stringify(pooledMerge, null, 2),
+				};
 			}
 
 			if (Date.now() < cred.expires) {

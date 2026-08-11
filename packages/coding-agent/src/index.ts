@@ -20,6 +20,9 @@ export {
 	FileAuthStorageBackend,
 	InMemoryAuthStorageBackend,
 	type OAuthCredential,
+	OPENAI_CODEX_PROVIDER_ID,
+	type OpenAICodexAccountPool,
+	type OpenAICodexOAuthAccount,
 } from "./core/auth-storage.js";
 // Compaction
 export {
@@ -139,6 +142,12 @@ export {
 export type { ReadonlyFooterDataProvider } from "./core/footer-data-provider.js";
 export { convertToLlm } from "./core/messages.js";
 export { ModelRegistry } from "./core/model-registry.js";
+export {
+	type OpenAICodexAccountChangedEvent,
+	type OpenAICodexAccountChangedListener,
+	OpenAICodexAccountManager,
+	type OpenAICodexAccountView,
+} from "./core/openai-codex-account-manager.js";
 export type {
 	PackageManager,
 	PathMetadata,

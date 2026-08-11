@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { registerOAuthProvider } from "@earendil-works/pi-ai/oauth";
+import { registerOAuthProvider, unregisterOAuthProvider } from "@earendil-works/pi-ai/oauth";
 import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
@@ -1113,6 +1113,413 @@ describe("AuthStorage", () => {
 			const apiKey = await authStorage.getApiKey("anthropic");
 
 			expect(apiKey).toBe("stored-key");
+		});
+	});
+
+	describe("openai-codex account pool", () => {
+		const future = () => Date.now() + 3_600_000;
+		const past = () => Date.now() - 60_000;
+
+		function codexJwt(accountId: string, email?: string): string {
+			const payload = Buffer.from(
+				JSON.stringify({
+					"https://api.openai.com/auth": { chatgpt_account_id: accountId },
+					...(email ? { email } : {}),
+				}),
+				"utf8",
+			).toString("base64");
+			return `aaa.${payload}.bbb`;
+		}
+
+		function accountFixture(
+			accountId: string,
+			overrides: { refresh?: string; expires?: number; email?: string; label?: string } = {},
+		) {
+			return {
+				access: codexJwt(accountId, overrides.email),
+				refresh: overrides.refresh ?? `refresh-${accountId}`,
+				expires: overrides.expires ?? future(),
+				accountId,
+				...(overrides.email ? { email: overrides.email } : {}),
+				...(overrides.label ? { label: overrides.label } : {}),
+			};
+		}
+
+		function pooledCredential(accounts: Record<string, ReturnType<typeof accountFixture>>, activeAccountId: string) {
+			const active = accounts[activeAccountId]!;
+			return {
+				type: "oauth" as const,
+				access: active.access,
+				refresh: active.refresh,
+				expires: active.expires,
+				accountId: active.accountId,
+				...(active.email ? { email: active.email } : {}),
+				...(active.label ? { label: active.label } : {}),
+				accountPool: {
+					schemaVersion: 1 as const,
+					activeAccountId,
+					accounts,
+				},
+			};
+		}
+
+		function readOnDisk(): Record<string, any> {
+			return JSON.parse(readFileSync(authJsonPath, "utf-8"));
+		}
+
+		function stubTokenEndpoint(
+			handler: (refreshToken: string) => { access: string; refresh: string; idToken?: string },
+		) {
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (_input: unknown, init?: RequestInit): Promise<Response> => {
+					const params = init?.body as URLSearchParams;
+					const result = handler(params.get("refresh_token") ?? "");
+					return new Response(
+						JSON.stringify({
+							access_token: result.access,
+							refresh_token: result.refresh,
+							expires_in: 3600,
+							...(result.idToken ? { id_token: result.idToken } : {}),
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}),
+			);
+		}
+
+		afterEach(() => {
+			vi.unstubAllGlobals();
+		});
+
+		test("migrates a legacy single credential into a one-account pool and persists it", () => {
+			const legacy = accountFixture("acc_a", { email: "a@example.com" });
+			writeAuthJson({ "openai-codex": { type: "oauth", ...legacy } });
+
+			authStorage = AuthStorage.create(authJsonPath);
+
+			const onDisk = readOnDisk();
+			expect(onDisk["openai-codex"].accountPool).toMatchObject({
+				schemaVersion: 1,
+				activeAccountId: "acc_a",
+			});
+			expect(onDisk["openai-codex"].accountPool.accounts.acc_a).toMatchObject({
+				accountId: "acc_a",
+				refresh: "refresh-acc_a",
+				email: "a@example.com",
+			});
+			// Top-level fields mirror the active account
+			expect(onDisk["openai-codex"].access).toBe(legacy.access);
+			expect(onDisk["openai-codex"].accountId).toBe("acc_a");
+			// Existing consumers still see a plain oauth credential
+			expect(authStorage.get("openai-codex")?.type).toBe("oauth");
+			expect(authStorage.listOpenAICodexAccounts().map((a) => a.accountId)).toEqual(["acc_a"]);
+		});
+
+		test("legacy credential without a derivable accountId gets a stable hash key", () => {
+			writeAuthJson({
+				"openai-codex": { type: "oauth", access: "opaque-access", refresh: "opaque-refresh", expires: future() },
+			});
+
+			authStorage = AuthStorage.create(authJsonPath);
+			const first = authStorage.listOpenAICodexAccounts();
+			expect(first).toHaveLength(1);
+			expect(first[0]!.accountId).toMatch(/^legacy-[0-9a-f]{16}$/);
+
+			// Stable across reloads
+			authStorage.reload();
+			expect(authStorage.listOpenAICodexAccounts()[0]!.accountId).toBe(first[0]!.accountId);
+		});
+
+		test("login upserts into the pool instead of replacing it", async () => {
+			writeAuthJson({ "openai-codex": { type: "oauth", ...accountFixture("acc_a", { email: "a@example.com" }) } });
+			authStorage = AuthStorage.create(authJsonPath);
+
+			let loginCount = 0;
+			registerOAuthProvider({
+				id: "openai-codex",
+				name: "Test Codex",
+				async login() {
+					loginCount++;
+					return accountFixture(`acc_${String.fromCharCode(98 + loginCount - 1)}`); // acc_b, acc_c, ...
+				},
+				async refreshToken(credentials) {
+					return credentials;
+				},
+				getApiKey(credentials) {
+					return credentials.access;
+				},
+			});
+			try {
+				await authStorage.login("openai-codex", {
+					onAuth: () => {},
+					onPrompt: async () => "",
+				});
+				await authStorage.login("openai-codex", {
+					onAuth: () => {},
+					onPrompt: async () => "",
+				});
+			} finally {
+				unregisterOAuthProvider("openai-codex");
+			}
+
+			const accounts = authStorage.listOpenAICodexAccounts().map((a) => a.accountId);
+			expect(accounts).toEqual(["acc_a", "acc_b", "acc_c"]);
+			expect(authStorage.getActiveOpenAICodexAccount()?.accountId).toBe("acc_c");
+			// Mirror follows the active account
+			const cred = authStorage.get("openai-codex");
+			if (cred?.type !== "oauth") {
+				throw new Error("expected oauth credential");
+			}
+			expect(cred.accountId).toBe("acc_c");
+		});
+
+		test("set() with an unpooled credential upserts instead of dropping pooled accounts", () => {
+			writeAuthJson({
+				"openai-codex": pooledCredential({ acc_a: accountFixture("acc_a") }, "acc_a"),
+			});
+			authStorage = AuthStorage.create(authJsonPath);
+
+			authStorage.set("openai-codex", { type: "oauth", ...accountFixture("acc_b") });
+
+			expect(authStorage.listOpenAICodexAccounts().map((a) => a.accountId)).toEqual(["acc_a", "acc_b"]);
+			expect(authStorage.getActiveOpenAICodexAccount()?.accountId).toBe("acc_b");
+		});
+
+		test("refresh only updates the expired active account and preserves the others", async () => {
+			writeAuthJson({
+				"openai-codex": pooledCredential(
+					{
+						acc_a: accountFixture("acc_a", { expires: past(), email: "a@example.com", label: "Personal" }),
+						acc_b: accountFixture("acc_b", { email: "b@example.com" }),
+					},
+					"acc_a",
+				),
+			});
+			authStorage = AuthStorage.create(authJsonPath);
+
+			const refreshedAccess = codexJwt("acc_a"); // no email claim on the new token
+			const refreshedRefreshTokens: string[] = [];
+			stubTokenEndpoint((refreshToken) => {
+				refreshedRefreshTokens.push(refreshToken);
+				return { access: refreshedAccess, refresh: "refresh-acc_a-2" };
+			});
+
+			const apiKey = await authStorage.getApiKey("openai-codex");
+			expect(apiKey).toBe(refreshedAccess);
+			expect(refreshedRefreshTokens).toEqual(["refresh-acc_a"]);
+
+			const onDisk = readOnDisk()["openai-codex"];
+			// Only the active account was refreshed; its email/label survived.
+			expect(onDisk.accountPool.accounts.acc_a.refresh).toBe("refresh-acc_a-2");
+			expect(onDisk.accountPool.accounts.acc_a.email).toBe("a@example.com");
+			expect(onDisk.accountPool.accounts.acc_a.label).toBe("Personal");
+			// Other account untouched.
+			expect(onDisk.accountPool.accounts.acc_b.refresh).toBe("refresh-acc_b");
+			expect(onDisk.accountPool.accounts.acc_b.email).toBe("b@example.com");
+			// Mirror follows the refreshed active account.
+			expect(onDisk.refresh).toBe("refresh-acc_a-2");
+			expect(onDisk.accountId).toBe("acc_a");
+		});
+
+		test("getOpenAICodexAccountApiKey refreshes a non-active account without moving the mirror", async () => {
+			writeAuthJson({
+				"openai-codex": pooledCredential(
+					{
+						acc_a: accountFixture("acc_a"),
+						acc_b: accountFixture("acc_b", { expires: past(), email: "b@example.com" }),
+					},
+					"acc_a",
+				),
+			});
+			authStorage = AuthStorage.create(authJsonPath);
+
+			const refreshedAccess = codexJwt("acc_b");
+			stubTokenEndpoint(() => ({ access: refreshedAccess, refresh: "refresh-acc_b-2" }));
+
+			const result = await authStorage.getOpenAICodexAccountApiKey("acc_b");
+			expect(result?.apiKey).toBe(refreshedAccess);
+			expect(result?.account.email).toBe("b@example.com");
+
+			const onDisk = readOnDisk()["openai-codex"];
+			expect(onDisk.accountPool.activeAccountId).toBe("acc_a");
+			expect(onDisk.refresh).toBe("refresh-acc_a");
+			expect(onDisk.accountPool.accounts.acc_b.refresh).toBe("refresh-acc_b-2");
+		});
+
+		test("compareAndSetActiveOpenAICodexAccount adopts the current active account on mismatch", () => {
+			writeAuthJson({
+				"openai-codex": pooledCredential(
+					{ acc_a: accountFixture("acc_a"), acc_b: accountFixture("acc_b") },
+					"acc_a",
+				),
+			});
+			authStorage = AuthStorage.create(authJsonPath);
+
+			const switched = authStorage.compareAndSetActiveOpenAICodexAccount("acc_a", "acc_b");
+			expect(switched).toMatchObject({ switched: true });
+			expect(switched?.account.accountId).toBe("acc_b");
+			expect(authStorage.getActiveOpenAICodexAccount()?.accountId).toBe("acc_b");
+
+			// Another process already switched away from acc_a: CAS reports no-op
+			// and returns the account that is actually active now.
+			const adopted = authStorage.compareAndSetActiveOpenAICodexAccount("acc_a", "acc_a");
+			expect(adopted).toMatchObject({ switched: false });
+			expect(adopted?.account.accountId).toBe("acc_b");
+			expect(authStorage.getActiveOpenAICodexAccount()?.accountId).toBe("acc_b");
+
+			expect(authStorage.compareAndSetActiveOpenAICodexAccount("acc_b", "acc_unknown")).toBeUndefined();
+		});
+
+		test("staleness is tracked per account", () => {
+			authStorage = AuthStorage.inMemory({
+				"openai-codex": pooledCredential(
+					{ acc_a: accountFixture("acc_a"), acc_b: accountFixture("acc_b") },
+					"acc_a",
+				),
+			});
+
+			const token = authStorage.getCurrentAuthSourceToken("openai-codex");
+			expect(token).toBeDefined();
+			authStorage.markAuthSourceStale(token!);
+			expect(authStorage.hasAuth("openai-codex")).toBe(false);
+
+			// Switching accounts changes the credential identity: the stale mark
+			// on acc_a must not poison acc_b.
+			authStorage.setActiveOpenAICodexAccount("acc_b");
+			expect(authStorage.hasAuth("openai-codex")).toBe(true);
+		});
+
+		test("snapshotOpenAICodexPool re-reads under the lock and observes another instance's writes", () => {
+			writeAuthJson({ "openai-codex": pooledCredential({ acc_a: accountFixture("acc_a") }, "acc_a") });
+			const storageA = AuthStorage.create(authJsonPath);
+			const storageB = AuthStorage.create(authJsonPath);
+
+			// B adds and activates a subscription; A's in-memory cache is stale.
+			storageB.upsertOpenAICodexAccount(accountFixture("acc_b", { email: "b@example.com" }));
+			expect(storageA.listOpenAICodexAccounts().map((a) => a.accountId)).toEqual(["acc_a"]);
+
+			const snapshot = storageA.snapshotOpenAICodexPool();
+			expect(snapshot?.accounts.map((a) => a.accountId).sort()).toEqual(["acc_a", "acc_b"]);
+			expect(snapshot?.activeAccountId).toBe("acc_b");
+
+			// The snapshot refreshed A's cached view as a side effect.
+			expect(storageA.getActiveOpenAICodexAccount()?.accountId).toBe("acc_b");
+		});
+
+		test("a pool with a broken activeAccountId pointer is repaired without losing accounts", () => {
+			writeAuthJson({
+				"openai-codex": {
+					type: "oauth",
+					...accountFixture("acc_a", { email: "a@example.com" }),
+					accountPool: {
+						schemaVersion: 1,
+						activeAccountId: "acc_missing",
+						accounts: {
+							acc_a: accountFixture("acc_a", { email: "a@example.com" }),
+							acc_b: accountFixture("acc_b"),
+						},
+					},
+				},
+			});
+
+			authStorage = AuthStorage.create(authJsonPath);
+			authStorage.reload();
+
+			const onDisk = readOnDisk()["openai-codex"];
+			// Repaired in place: both nested accounts (and their refresh tokens)
+			// survive; only the dangling pointer is re-pointed.
+			expect(Object.keys(onDisk.accountPool.accounts).sort()).toEqual(["acc_a", "acc_b"]);
+			expect(onDisk.accountPool.accounts.acc_b.refresh).toBe("refresh-acc_b");
+			expect(["acc_a", "acc_b"]).toContain(onDisk.accountPool.activeAccountId);
+			expect(
+				authStorage
+					.listOpenAICodexAccounts()
+					.map((a) => a.accountId)
+					.sort(),
+			).toEqual(["acc_a", "acc_b"]);
+		});
+
+		test("an unsalvageable pool is preserved on disk instead of being rebuilt", () => {
+			const mirror = accountFixture("acc_a", { email: "a@example.com" });
+			writeAuthJson({
+				"openai-codex": {
+					type: "oauth",
+					...mirror,
+					// Unknown schema + non-object accounts: nothing safely repairable.
+					accountPool: { schemaVersion: 2, activeAccountId: "acc_a", accounts: "bogus" },
+				},
+			});
+			const before = readFileSync(authJsonPath, "utf-8");
+
+			authStorage = AuthStorage.create(authJsonPath);
+			authStorage.reload();
+
+			// No destructive rewrite: the malformed pool survives byte-for-byte.
+			expect(readFileSync(authJsonPath, "utf-8")).toBe(before);
+			// Reads fall back to the top-level mirror account.
+			expect(authStorage.listOpenAICodexAccounts().map((a) => a.accountId)).toEqual(["acc_a"]);
+			expect(authStorage.getActiveOpenAICodexAccount()?.accountId).toBe("acc_a");
+			expect(authStorage.getActiveOpenAICodexAccount()?.email).toBe("a@example.com");
+		});
+
+		test("upsert refuses to overwrite an unsalvageable pool", () => {
+			writeAuthJson({
+				"openai-codex": {
+					type: "oauth",
+					...accountFixture("acc_a"),
+					accountPool: { schemaVersion: 2, activeAccountId: "acc_a", accounts: "bogus" },
+				},
+			});
+			authStorage = AuthStorage.create(authJsonPath);
+
+			expect(() => authStorage.upsertOpenAICodexAccount(accountFixture("acc_c"))).toThrow(/malformed/);
+
+			const onDisk = readOnDisk()["openai-codex"];
+			expect(onDisk.accountPool.schemaVersion).toBe(2);
+			expect(onDisk.accountPool.accounts).toBe("bogus");
+		});
+
+		test("legacy migration backfills email from the access token claim", () => {
+			writeAuthJson({
+				"openai-codex": {
+					type: "oauth",
+					access: codexJwt("acc_a", "migrated@example.com"),
+					refresh: "refresh-acc_a",
+					expires: future(),
+					accountId: "acc_a",
+				},
+			});
+
+			authStorage = AuthStorage.create(authJsonPath);
+
+			expect(authStorage.listOpenAICodexAccounts()[0]?.email).toBe("migrated@example.com");
+			expect(readOnDisk()["openai-codex"].accountPool.accounts.acc_a.email).toBe("migrated@example.com");
+		});
+
+		test("backfills a missing email from the access token on next use", async () => {
+			// The stored account record lacks email, but its access token carries
+			// the email claim.
+			writeAuthJson({
+				"openai-codex": pooledCredential(
+					{
+						acc_a: {
+							access: codexJwt("acc_a", "backfill@example.com"),
+							refresh: "refresh-acc_a",
+							expires: future(),
+							accountId: "acc_a",
+						},
+					},
+					"acc_a",
+				),
+			});
+			authStorage = AuthStorage.create(authJsonPath);
+			expect(authStorage.listOpenAICodexAccounts()[0]?.email).toBeUndefined();
+
+			const result = await authStorage.getOpenAICodexAccountApiKey("acc_a");
+
+			expect(result?.account.email).toBe("backfill@example.com");
+			expect(readOnDisk()["openai-codex"].accountPool.accounts.acc_a.email).toBe("backfill@example.com");
 		});
 	});
 });
