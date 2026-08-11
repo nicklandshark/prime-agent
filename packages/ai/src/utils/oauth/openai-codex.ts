@@ -304,9 +304,14 @@ function startLocalOAuthServer(state: string): Promise<OAuthServerInfo> {
 	});
 }
 
+const PROFILE_CLAIM_PATH = "https://api.openai.com/profile";
+
 function readEmailClaim(payload: JwtPayload | null): string | undefined {
-	const email = payload?.email;
-	return typeof email === "string" && email.length > 0 ? email : undefined;
+	const direct = payload?.email;
+	if (typeof direct === "string" && direct.length > 0) return direct;
+	const profile = payload?.[PROFILE_CLAIM_PATH] as { email?: unknown } | undefined;
+	const nested = profile?.email;
+	return typeof nested === "string" && nested.length > 0 ? nested : undefined;
 }
 
 /**
