@@ -107,7 +107,12 @@ export type {
 	ToolDefinition,
 } from "./extensions/index.js";
 export type { PromptTemplate } from "./prompt-templates.js";
-export type { CreateRlmSubagentRuntimeOptions, RlmSubagentRuntime, SubagentRuntimeHost } from "./rlm-runtime.js";
+export type {
+	CreateRlmSubagentRuntimeOptions,
+	RlmCursorCloudTarget,
+	RlmSubagentRuntime,
+	SubagentRuntimeHost,
+} from "./rlm-runtime.js";
 export type { Skill } from "./skills.js";
 export type { Tool } from "./tools/index.js";
 

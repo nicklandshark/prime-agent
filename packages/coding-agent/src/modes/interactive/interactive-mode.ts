@@ -82,6 +82,11 @@ import {
 	DEFAULT_HEARTBEAT_DELIVERY_MODE,
 	parseHeartbeatCommand,
 } from "../../core/cron-jobs.js";
+import {
+	type CursorCloudEnvironmentView,
+	getCachedCursorCloudEnvironments,
+	listCursorCloudEnvironments,
+} from "../../core/cursor-cloud-environments.js";
 import type {
 	AutocompleteProviderFactory,
 	ContextUsage,
@@ -187,6 +192,7 @@ import { ConfigurationMenuComponent, type ConfigurationMenuTab } from "./compone
 import { formatContextTree } from "./components/context-tree-format.js";
 import { isCompactAgentMessageNeighbor } from "./components/conversation-components.js";
 import { CountdownTimer } from "./components/countdown-timer.js";
+import { CursorCloudEnvironmentsComponent } from "./components/cursor-cloud-environments.js";
 import { CustomEditor } from "./components/custom-editor.js";
 import { CustomMessageComponent } from "./components/custom-message.js";
 import { DaxnutsComponent } from "./components/daxnuts.js";
@@ -4918,6 +4924,11 @@ export class InteractiveMode {
 					await this.showConfigurationMenu("providers");
 					return;
 				}
+				if (commandName === "cursor-cloud" && !commandArgs) {
+					this.editor.setText("");
+					await this.showCursorCloudEnvironments();
+					return;
+				}
 				if (commandName === "logout" && !commandArgs) {
 					this.editor.setText("");
 					await this.showLogoutSelector();
@@ -8096,6 +8107,66 @@ export class InteractiveMode {
 			});
 			handle = this.showFullPaneOverlay(menu, 96);
 			refreshModels(initialModelSearch !== undefined);
+		});
+	}
+
+	/**
+	 * /cursor-cloud: full-pane viewer for the user's Cursor cloud environments.
+	 * Registry rows render immediately; live server state is fetched in the
+	 * background and swapped in via updateEnvironments (aborted on close).
+	 */
+	private showCursorCloudEnvironments(): Promise<void> {
+		const cached = getCachedCursorCloudEnvironments();
+		return new Promise((resolve) => {
+			let handle: OverlayHandle | undefined;
+			let settled = false;
+			const abort = new AbortController();
+			const finish = () => {
+				if (settled) return;
+				settled = true;
+				abort.abort();
+				component.dispose();
+				handle?.hide();
+				this.ui.requestRender();
+				resolve();
+			};
+			const component = new CursorCloudEnvironmentsComponent(
+				this.ui,
+				cached,
+				{
+					onSelect: (environment: CursorCloudEnvironmentView) => {
+						finish();
+						// Prefill a ready-to-run rlm(...) spawn targeting this environment; the
+						// user edits the task and submits, and the model spawns the subagent
+						// onto the selected Cursor cloud environment.
+						this.editor.setText(
+							`await rlm("${environment.name}: ", model="cursor/cloud-agent", agent_id="${environment.agentId}")`,
+						);
+						this.showStatus(
+							`Spawning on ${environment.name} — edit the task and submit (agent_id=${environment.agentId})`,
+						);
+					},
+					onCancel: finish,
+				},
+				{ getRows: () => this.ui.terminal.rows },
+				true,
+			);
+			// Mouse hit-testing uses the pre-fullscreen input listener chain, so the
+			// fullscreen mouse must stay active (no suspendFullscreenMouse).
+			handle = this.showFullPaneOverlay(component, 96);
+			listCursorCloudEnvironments({ signal: abort.signal })
+				.then((result) => {
+					if (settled) return;
+					component.updateEnvironments(result.environments, false, result.serverError);
+				})
+				.catch(() => {
+					if (settled) return;
+					component.updateEnvironments(
+						getCachedCursorCloudEnvironments(),
+						false,
+						"failed to reach the Cursor API",
+					);
+				});
 		});
 	}
 

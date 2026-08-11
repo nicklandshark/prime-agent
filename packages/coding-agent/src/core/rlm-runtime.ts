@@ -1,5 +1,5 @@
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
+import type { StreamFn, ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { Api, Model, ServiceTier, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { isValidThinkingLevel, VALID_THINKING_LEVELS } from "../cli/args.js";
 import type { AgentSession } from "./agent-session.js";
 import type { ToolDefinition } from "./extensions/index.js";
@@ -21,6 +21,8 @@ export interface RlmSpawnHandle {
 	thinking: ThinkingLevel;
 	/** Whether the child actually runs on the fast tier, after clamping to what its model supports. */
 	fast: boolean;
+	/** Cursor cloud agent the child was bound to at spawn, when the agent_id kwarg was used. */
+	cursor_agent_id?: string;
 }
 
 export type RlmSubagentRegistryStatus = "running" | "completed" | "error";
@@ -133,6 +135,107 @@ export function normalizeRequestedRlmSubagentFastMode(value: unknown): ServiceTi
 		throw new Error("rlm.run fast must be a boolean");
 	}
 	return value ? "priority" : "default";
+}
+
+/** Provider id of Cursor cloud agent models (e.g. cursor/cloud-agent). */
+export const CURSOR_CLOUD_PROVIDER_ID = "cursor";
+
+const CURSOR_CLOUD_AGENT_ID_PREFIX = "bc-";
+
+/**
+ * Cursor cloud environment targeting for a spawned subagent.
+ *
+ * Only meaningful when the resolved child model belongs to the cursor provider; the spawn
+ * path rejects these kwargs for any other model instead of silently dropping them.
+ */
+export interface RlmCursorCloudTarget {
+	/** Existing cloud agent id (`bc-...`) to send the task to as a follow-up run. */
+	agentId?: string;
+	/** GitHub repo URLs cloned into the cloud VM when a new agent has to be created. */
+	repos?: string[];
+	/** Tunnel preamble preference for newly created agents; the provider default applies when unset. */
+	tunnel?: boolean;
+}
+
+/** Validate and normalize an orchestrator-supplied Cursor cloud agent id. */
+export function normalizeRequestedRlmSubagentCursorAgentId(value: unknown): string | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (typeof value !== "string") {
+		throw new Error("rlm.run agent_id must be a string");
+	}
+	const agentId = value.trim();
+	if (!agentId) {
+		throw new Error("rlm.run agent_id must not be empty");
+	}
+	if (!agentId.startsWith(CURSOR_CLOUD_AGENT_ID_PREFIX)) {
+		throw new Error(
+			`rlm.run agent_id must be a Cursor cloud agent id starting with "${CURSOR_CLOUD_AGENT_ID_PREFIX}"`,
+		);
+	}
+	return agentId;
+}
+
+/** Validate and normalize orchestrator-supplied GitHub repos for a fresh Cursor cloud environment. */
+export function normalizeRequestedRlmSubagentCursorRepos(value: unknown): string[] | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (!Array.isArray(value)) {
+		throw new Error("rlm.run repos must be an array of GitHub repository URLs");
+	}
+	const repos = value.map((entry) => {
+		if (typeof entry !== "string") {
+			throw new Error("rlm.run repos must be an array of GitHub repository URLs");
+		}
+		const repo = entry.trim();
+		if (!repo) {
+			throw new Error("rlm.run repos must not contain empty entries");
+		}
+		return repo;
+	});
+	if (repos.length === 0) {
+		throw new Error("rlm.run repos must not be empty");
+	}
+	return repos;
+}
+
+/** Validate an orchestrator-supplied tunnel preference for newly created Cursor cloud agents. */
+export function normalizeRequestedRlmSubagentCursorTunnel(value: unknown): boolean | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (typeof value !== "boolean") {
+		throw new Error("rlm.run tunnel must be a boolean");
+	}
+	return value;
+}
+
+/**
+ * Bind a child agent's stream function to a Cursor cloud environment target.
+ *
+ * Cursor models receive the target on every stream call as provider options
+ * (`agentId`/`repos`/`tunnel`, plus `metadata.cursorAgentId`), which the cursor provider's
+ * streamSimple maps onto its CursorOptions. Models from any other provider pass through
+ * untouched, so a child that switches models mid-run never leaks the target into a
+ * non-cursor request.
+ */
+export function wrapRlmSubagentStreamFnWithCursorTarget(streamFn: StreamFn, target: RlmCursorCloudTarget): StreamFn {
+	return (model, context, options) => {
+		if (model.provider !== CURSOR_CLOUD_PROVIDER_ID) {
+			return streamFn(model, context, options);
+		}
+		const metadata = target.agentId ? { ...options?.metadata, cursorAgentId: target.agentId } : options?.metadata;
+		const targeted = {
+			...options,
+			...(target.agentId ? { agentId: target.agentId } : {}),
+			...(target.repos ? { repos: target.repos } : {}),
+			...(target.tunnel !== undefined ? { tunnel: target.tunnel } : {}),
+			...(metadata ? { metadata } : {}),
+		} as SimpleStreamOptions;
+		return streamFn(model, context, targeted);
+	};
 }
 
 /** Create a readable, collision-resistant default name usable as an agent-message selector. */
@@ -264,6 +367,11 @@ export interface CreateRlmSubagentRuntimeOptions {
 	rlmDepth: number;
 	rlmMaxDepth: number;
 	rlmParentNodeId: string;
+	/**
+	 * Cursor cloud environment target for the child. Only set when the resolved child model
+	 * belongs to the cursor provider; the spawn path rejects it for any other model.
+	 */
+	cursor?: RlmCursorCloudTarget;
 	/** Source of the IPython cell that spawned this subagent, for display. */
 	spawnCode?: string;
 	/** Publish the session to the parent before a host makes the runtime addressable. */

@@ -216,16 +216,21 @@ import { resolveConfigValue } from "./resolve-config-value.js";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
 import {
 	type CreateRlmSubagentRuntimeOptions,
+	CURSOR_CLOUD_PROVIDER_ID,
 	createDefaultRlmSubagentSessionName,
 	createRlmDeleteSubagentHostHandler,
 	createRlmFindModelsHostHandler,
 	createRlmListSubagentsHostHandler,
 	createRlmRunHostHandler,
 	findRlmModelMatches,
+	normalizeRequestedRlmSubagentCursorAgentId,
+	normalizeRequestedRlmSubagentCursorRepos,
+	normalizeRequestedRlmSubagentCursorTunnel,
 	normalizeRequestedRlmSubagentFastMode,
 	normalizeRequestedRlmSubagentModel,
 	normalizeRequestedRlmSubagentSessionName,
 	normalizeRequestedRlmSubagentThinkingLevel,
+	type RlmCursorCloudTarget,
 	type RlmDeleteSubagentResult,
 	type RlmFindModelsResult,
 	type RlmListSubagentsResult,
@@ -233,6 +238,7 @@ import {
 	type RlmSubagentRegistryEntry,
 	type RlmSubagentRuntime,
 	type SubagentRuntimeHost,
+	wrapRlmSubagentStreamFnWithCursorTarget,
 } from "./rlm-runtime.js";
 import {
 	ActionStore,
@@ -9023,11 +9029,16 @@ export class AgentSession {
 	}
 
 	private async _createRlmSubagentRuntime(options: CreateRlmSubagentRuntimeOptions): Promise<RlmSubagentRuntime> {
-		if (this._subagentRuntimeHost) {
-			return await this._subagentRuntimeHost.createRlmSubagentRuntime(options);
+		const runtime = this._subagentRuntimeHost
+			? await this._subagentRuntimeHost.createRlmSubagentRuntime(options)
+			: this._createInlineRlmSubagentRuntime(options);
+		if (options.cursor) {
+			// Bind every stream the child makes to the requested cloud environment, whichever
+			// host built the runtime; the wrapper passes non-cursor models through untouched.
+			const childAgent = runtime.session.agent;
+			childAgent.streamFn = wrapRlmSubagentStreamFnWithCursorTarget(childAgent.streamFn, options.cursor);
 		}
-
-		return this._createInlineRlmSubagentRuntime(options);
+		return runtime;
 	}
 
 	private _createInlineRlmSubagentRuntime(options: CreateRlmSubagentRuntimeOptions): RlmSubagentRuntime {
@@ -9671,7 +9682,16 @@ export class AgentSession {
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
 	): Promise<RlmSpawnHandle> {
-		const { name: rawName, model: rawModel, thinking: rawThinking, fast: rawFast, ...unsupported } = kwargs;
+		const {
+			name: rawName,
+			model: rawModel,
+			thinking: rawThinking,
+			fast: rawFast,
+			agent_id: rawAgentId,
+			repos: rawRepos,
+			tunnel: rawTunnel,
+			...unsupported
+		} = kwargs;
 		const unsupportedKwargs = Object.keys(unsupported);
 		if (unsupportedKwargs.length > 0) {
 			throw new Error(`Unsupported rlm.run kwargs: ${unsupportedKwargs.sort().join(", ")}`);
@@ -9680,6 +9700,9 @@ export class AgentSession {
 		const requestedModel = normalizeRequestedRlmSubagentModel(rawModel);
 		const requestedThinkingLevel = normalizeRequestedRlmSubagentThinkingLevel(rawThinking);
 		const requestedServiceTier = normalizeRequestedRlmSubagentFastMode(rawFast);
+		const requestedCursorAgentId = normalizeRequestedRlmSubagentCursorAgentId(rawAgentId);
+		const requestedCursorRepos = normalizeRequestedRlmSubagentCursorRepos(rawRepos);
+		const requestedCursorTunnel = normalizeRequestedRlmSubagentCursorTunnel(rawTunnel);
 		if (requestedSessionName) assertDirectAgentMessageTarget(requestedSessionName);
 		if (this._rlmDepth >= this._rlmMaxDepth) {
 			throw new Error(
@@ -9698,6 +9721,21 @@ export class AgentSession {
 			modelSelection = await this._resolveRlmSubagentModel(requestedModel);
 		} finally {
 			if (requestedSessionName) this._pendingRlmSubagentSessionNames.delete(requestedSessionName);
+		}
+		const cursorTarget: RlmCursorCloudTarget | undefined =
+			requestedCursorAgentId || requestedCursorRepos || requestedCursorTunnel !== undefined
+				? {
+						...(requestedCursorAgentId ? { agentId: requestedCursorAgentId } : {}),
+						...(requestedCursorRepos ? { repos: requestedCursorRepos } : {}),
+						...(requestedCursorTunnel !== undefined ? { tunnel: requestedCursorTunnel } : {}),
+					}
+				: undefined;
+		if (cursorTarget && modelSelection.model.provider !== CURSOR_CLOUD_PROVIDER_ID) {
+			throw new Error(
+				`rlm.run agent_id, repos, and tunnel target Cursor cloud environments and require a cursor model ` +
+					`(e.g. ${CURSOR_CLOUD_PROVIDER_ID}/cloud-agent); the resolved subagent model is ` +
+					`${modelSelection.model.provider}/${modelSelection.model.id}`,
+			);
 		}
 		if (this._disposed || this._disposing) throw new Error("Cannot spawn a subagent after its parent was disposed");
 
@@ -9772,6 +9810,7 @@ export class AgentSession {
 				thinkingLevel: requestedThinkingLevel,
 				serviceTier: requestedServiceTier,
 			}),
+			...(cursorTarget ? { cursor: cursorTarget } : {}),
 			onSessionPublished: publishChildSession,
 		};
 
@@ -10020,6 +10059,7 @@ export class AgentSession {
 			model: `${modelSelection.model.provider}/${modelSelection.model.id}`,
 			thinking: subagentOptions.thinkingLevel,
 			fast: subagentOptions.serviceTier === "priority",
+			...(cursorTarget?.agentId ? { cursor_agent_id: cursorTarget.agentId } : {}),
 		};
 	}
 
