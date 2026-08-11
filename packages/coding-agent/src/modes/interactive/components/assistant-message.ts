@@ -8,7 +8,11 @@ import {
 	shouldCollapseErrorDetails,
 	summarizeErrorDetails,
 } from "./collapsible-error.js";
-import { createMarkdownTransform, type MarkdownTransformer } from "./markdown-transform.js";
+import {
+	createMarkdownTransform,
+	type MarkdownTransformer,
+	type MarkdownTransformIssue,
+} from "./markdown-transform.js";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -19,6 +23,7 @@ export interface AssistantMessageComponentOptions {
 	expanded?: boolean;
 	precededByToolActivity?: boolean;
 	markdownTransformers?: readonly MarkdownTransformer[];
+	onFinalMarkdownTransformIssue?: (issue: MarkdownTransformIssue) => void;
 }
 
 function getThinkingMarkdownTheme(baseTheme: MarkdownTheme): MarkdownTheme {
@@ -73,6 +78,8 @@ export class AssistantMessageComponent extends Container {
 	private lastBlockTexts = new Map<number, string>();
 	private precededByToolActivity: boolean;
 	private markdownTransformers: readonly MarkdownTransformer[];
+	private onFinalMarkdownTransformIssue?: (issue: MarkdownTransformIssue) => void;
+	private reportFinalMarkdownTransformIssues = false;
 	private isStreaming = false;
 
 	constructor(
@@ -90,6 +97,7 @@ export class AssistantMessageComponent extends Container {
 		this.expanded = options.expanded ?? false;
 		this.precededByToolActivity = options.precededByToolActivity ?? false;
 		this.markdownTransformers = options.markdownTransformers ?? [];
+		this.onFinalMarkdownTransformIssue = options.onFinalMarkdownTransformIssue;
 
 		// Container for text/thinking content
 		this.contentContainer = new Container();
@@ -125,23 +133,33 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	override render(width: number): string[] {
-		if (this.dirty) {
-			if (this.lastMessage) {
-				this.reconcile(this.lastMessage);
+		const disarmFinalIssueReporting = this.reportFinalMarkdownTransformIssues;
+		try {
+			if (this.dirty) {
+				if (this.lastMessage) {
+					this.reconcile(this.lastMessage);
+				}
+				this.dirty = false;
 			}
-			this.dirty = false;
-		}
-		const lines = super.render(width);
-		if (this.hasToolCalls || lines.length === 0) {
-			return lines;
-		}
+			const lines = super.render(width);
+			if (this.hasToolCalls || lines.length === 0) {
+				return lines;
+			}
 
-		lines[0] = OSC133_ZONE_START + lines[0];
-		lines[lines.length - 1] = OSC133_ZONE_END + OSC133_ZONE_FINAL + lines[lines.length - 1];
-		return lines;
+			lines[0] = OSC133_ZONE_START + lines[0];
+			lines[lines.length - 1] = OSC133_ZONE_END + OSC133_ZONE_FINAL + lines[lines.length - 1];
+			return lines;
+		} finally {
+			if (disarmFinalIssueReporting) {
+				this.reportFinalMarkdownTransformIssues = false;
+			}
+		}
 	}
 
 	updateContent(message: AssistantMessage, isStreaming = this.isStreaming): void {
+		if (this.isStreaming && !isStreaming && message.stopReason === "stop") {
+			this.reportFinalMarkdownTransformIssues = true;
+		}
 		this.lastMessage = message;
 		this.isStreaming = isStreaming;
 		this.dirty = true;
@@ -221,7 +239,11 @@ export class AssistantMessageComponent extends Container {
 				// Assistant text messages with no background - trim the text
 				// Set paddingY=0 to avoid extra spacing before tool executions
 				const markdown = new Markdown(content.text.trim(), 1, 0, this.markdownTheme, undefined, {
-					transform: createMarkdownTransform("assistant", this.isStreaming, this.markdownTransformers),
+					transform: createMarkdownTransform("assistant", this.isStreaming, this.markdownTransformers, (issue) => {
+						if (this.reportFinalMarkdownTransformIssues) {
+							this.onFinalMarkdownTransformIssue?.(issue);
+						}
+					}),
 				});
 				this.blockMarkdowns.set(i, markdown);
 				this.lastBlockTexts.set(i, content.text.trim());

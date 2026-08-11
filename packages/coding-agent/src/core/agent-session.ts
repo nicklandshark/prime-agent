@@ -554,8 +554,10 @@ export interface PromptOptions {
 	images?: ImageContent[];
 	/** When streaming, how to queue the message: "steer" (interrupt) or "followUp" (wait). Required if streaming. */
 	streamingBehavior?: "steer" | "followUp";
-	/** Coalesce follow-up queueing so only one pending follow-up exists for this key. */
+	/** Coalesce follow-up queueing by this key. */
 	followUpQueueKey?: string;
+	/** Keep the key reserved only while pending (default) or through action completion. */
+	followUpQueueKeyLifetime?: "pending" | "action";
 	/** Source of input for extension input event handlers. Defaults to "interactive". */
 	source?: InputSource;
 	/** Internal hook used by RPC mode to observe prompt preflight acceptance or rejection. */
@@ -697,6 +699,7 @@ interface RestoredPromptInput {
 	content?: (TextContent | ImageContent)[];
 	images?: ImageContent[];
 	queueKey?: string;
+	queueKeyLifetime?: "pending" | "action";
 	agentMessageId?: string;
 	customMessage?: CustomMessage;
 	prefixMessages?: CustomMessage[];
@@ -739,6 +742,7 @@ export interface SessionActionRecoveryAction {
 	wake: WakePolicy;
 	payload: SessionActionRecoveryPayload;
 	queueKey?: string;
+	queueKeyLifetime?: "pending" | "action";
 	agentMessageId?: string;
 	suppressAutonomousContinuation?: boolean;
 }
@@ -4573,6 +4577,7 @@ export class AgentSession {
 				message,
 				prefixMessages,
 				queueKey: options?.followUpQueueKey,
+				queueKeyLifetime: options?.followUpQueueKeyLifetime,
 				previewLabel: injectedMessagePreviewLabel(message),
 				suppressAutonomousContinuation: options?.suppressAutonomousContinuation,
 				resumeIfIdle:
@@ -4719,6 +4724,7 @@ export class AgentSession {
 				const action = this._createPreparedTurnAction(schedule, normalized.text, normalized.images, {
 					agentMessageId: options?.agentMessageId,
 					queueKey: options?.followUpQueueKey,
+					queueKeyLifetime: options?.followUpQueueKeyLifetime,
 					content,
 					message: primaryMessage,
 					prefixMessages,
@@ -4874,6 +4880,7 @@ export class AgentSession {
 		images?: ImageContent[],
 		options: {
 			queueKey?: string;
+			queueKeyLifetime?: "pending" | "action";
 			agentMessageId?: string;
 			resumeIfIdle?: boolean;
 		} = {},
@@ -4890,6 +4897,7 @@ export class AgentSession {
 
 		await this._queuePreparedPrompt("steer", normalized.text, normalized.images, {
 			queueKey: options.queueKey,
+			queueKeyLifetime: options.queueKeyLifetime,
 			agentMessageId: options.agentMessageId,
 			resumeIfIdle: options.resumeIfIdle,
 		});
@@ -4907,6 +4915,7 @@ export class AgentSession {
 		images?: ImageContent[],
 		options: {
 			queueKey?: string;
+			queueKeyLifetime?: "pending" | "action";
 			agentMessageId?: string;
 			resumeIfIdle?: boolean;
 		} = {},
@@ -4923,6 +4932,7 @@ export class AgentSession {
 
 		return this._queuePreparedPrompt("followUp", normalized.text, normalized.images, {
 			queueKey: options.queueKey,
+			queueKeyLifetime: options.queueKeyLifetime,
 			agentMessageId: options.agentMessageId,
 			resumeIfIdle: options.resumeIfIdle,
 		});
@@ -5005,6 +5015,7 @@ export class AgentSession {
 				payload,
 				lifecycle: { state: "queued" },
 				...(recovered.queueKey ? { queueKey: recovered.queueKey } : {}),
+				...(recovered.queueKeyLifetime ? { queueKeyLifetime: recovered.queueKeyLifetime } : {}),
 				...(recovered.agentMessageId ? { agentMessageId: recovered.agentMessageId } : {}),
 				...(recovered.suppressAutonomousContinuation ? { suppressAutonomousContinuation: true } : {}),
 			};
@@ -5035,6 +5046,7 @@ export class AgentSession {
 	private _restorePromptInput(schedule: SessionInputSchedule, snapshot: RestoredPromptInput): Promise<boolean> {
 		return this._queuePreparedPrompt(schedule, snapshot.text, snapshot.images, {
 			queueKey: snapshot.queueKey,
+			queueKeyLifetime: snapshot.queueKeyLifetime,
 			agentMessageId: snapshot.agentMessageId,
 			content: snapshot.content,
 			message: snapshot.customMessage,
@@ -5048,6 +5060,7 @@ export class AgentSession {
 		images?: ImageContent[],
 		options: {
 			queueKey?: string;
+			queueKeyLifetime?: "pending" | "action";
 			agentMessageId?: string;
 			content?: (TextContent | ImageContent)[];
 			customMessage?: CustomMessage;
@@ -5063,6 +5076,7 @@ export class AgentSession {
 			text,
 			images,
 			queueKey: options.queueKey,
+			queueKeyLifetime: options.queueKeyLifetime,
 			agentMessageId: options.agentMessageId,
 			content: options.content,
 			customMessage: options.customMessage,
@@ -5075,6 +5089,7 @@ export class AgentSession {
 		images?: ImageContent[],
 		options: {
 			queueKey?: string;
+			queueKeyLifetime?: "pending" | "action";
 			agentMessageId?: string;
 			content?: (TextContent | ImageContent)[];
 			customMessage?: CustomMessage;
@@ -5094,6 +5109,7 @@ export class AgentSession {
 			text,
 			images,
 			queueKey: options.queueKey,
+			queueKeyLifetime: options.queueKeyLifetime,
 			agentMessageId: options.agentMessageId,
 			content: options.content,
 			customMessage: options.customMessage,
@@ -5211,6 +5227,7 @@ export class AgentSession {
 		options: {
 			agentMessageId?: string;
 			queueKey?: string;
+			queueKeyLifetime?: "pending" | "action";
 			content?: (TextContent | ImageContent)[];
 			message?: QueuedAgentMessage;
 			prefixMessages?: CustomMessage[];
@@ -5264,6 +5281,7 @@ export class AgentSession {
 			payload,
 			lifecycle: { state: "queued" },
 			queueKey: options.queueKey,
+			queueKeyLifetime: options.queueKeyLifetime,
 			agentMessageId: options.agentMessageId,
 			suppressAutonomousContinuation: options.suppressAutonomousContinuation,
 		};
@@ -5297,7 +5315,9 @@ export class AgentSession {
 			.find(
 				(candidate) =>
 					candidate.queueKey === action.queueKey &&
-					(candidate.lifecycle.state === "queued" ||
+					(action.queueKeyLifetime === "action" ||
+						candidate.queueKeyLifetime === "action" ||
+						candidate.lifecycle.state === "queued" ||
 						candidate.lifecycle.state === "selected" ||
 						candidate.lifecycle.state === "preparing"),
 			);
@@ -5374,6 +5394,7 @@ export class AgentSession {
 		options: {
 			agentMessageId?: string;
 			queueKey?: string;
+			queueKeyLifetime?: "pending" | "action";
 			content?: (TextContent | ImageContent)[];
 			message?: QueuedAgentMessage;
 			prefixMessages?: CustomMessage[];
@@ -6213,6 +6234,7 @@ export class AgentSession {
 				delivery: action.delivery,
 				wake: action.wake,
 				...(action.queueKey ? { queueKey: action.queueKey } : {}),
+				...(action.queueKeyLifetime ? { queueKeyLifetime: action.queueKeyLifetime } : {}),
 				...(action.agentMessageId ? { agentMessageId: action.agentMessageId } : {}),
 				...(action.suppressAutonomousContinuation ? { suppressAutonomousContinuation: true } : {}),
 				payload:

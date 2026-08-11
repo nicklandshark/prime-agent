@@ -201,7 +201,7 @@ import { FooterComponent } from "./components/footer.js";
 import { HeartbeatManagerComponent } from "./components/heartbeat-manager.js";
 import { InjectedPromptMessageComponent, isInjectedPromptMessage } from "./components/injected-prompt-message.js";
 import { formatKeyText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.js";
-import type { MarkdownTransformer } from "./components/markdown-transform.js";
+import type { MarkdownTransformer, MarkdownTransformIssue } from "./components/markdown-transform.js";
 import { createMermaidMarkdownTransformer } from "./components/mermaid.js";
 import type { AuthSelectorProvider } from "./components/oauth-selector.js";
 import {
@@ -284,6 +284,14 @@ const HEARTBEAT_LEGACY_PROMPT_MIN_TOLERANCE_MS = 15_000;
 const HEARTBEAT_LEGACY_PROMPT_MAX_TOLERANCE_MS = 120_000;
 const MODEL_CATALOG_REFRESH_TTL_MS = 60_000;
 const FEATURE_HINT_DELAY_MS = 5_000;
+export const MERMAID_RERENDER_PROMPT_PREFIX = "[prime-agent:mermaid-rerender]";
+const MERMAID_RERENDER_FOLLOW_UP_QUEUE_KEY = "interactive:mermaid-rerender";
+
+function isMermaidRerenderPrompt(text: string): boolean {
+	return text.startsWith(
+		`${MERMAID_RERENDER_PROMPT_PREFIX}\nThe Mermaid diagram in your immediately preceding response does not fit the terminal.`,
+	);
+}
 
 export const START_HINTS = [
 	'Try "refactor @<filepath>"',
@@ -968,6 +976,9 @@ export class InteractiveMode {
 	// Thinking block visibility state
 	private hideThinkingBlock = false;
 	private readonly mermaidMarkdownTransformer: MarkdownTransformer;
+	private mermaidRerenderPendingPrompt?: string;
+	private suppressMermaidRerenderForAgentRun = false;
+	private mermaidRerenderAdmissionAbort?: AbortController;
 
 	// Skill commands: command name -> skill file path
 	private skillCommands = new Map<string, string>();
@@ -1083,6 +1094,7 @@ export class InteractiveMode {
 		this.agentConnection.onBeforeSessionInvalidate(() => {
 			this.resetExtensionUI();
 			this.resetSideQuestion();
+			this.resetMermaidRerender();
 		});
 		this.version = VERSION;
 		this.ui = new TUI(new ProcessTerminal(), this.settingsManager.getShowHardwareCursor());
@@ -1820,6 +1832,104 @@ export class InteractiveMode {
 
 	private getMarkdownTransformers(): readonly MarkdownTransformer[] {
 		return [this.mermaidMarkdownTransformer];
+	}
+
+	private resetMermaidRerender(): void {
+		this.mermaidRerenderAdmissionAbort?.abort();
+		this.mermaidRerenderAdmissionAbort = undefined;
+		this.mermaidRerenderPendingPrompt = undefined;
+		this.suppressMermaidRerenderForAgentRun = false;
+	}
+
+	private restoreMermaidRerenderSuppression(
+		messages: readonly AgentMessage[],
+		streamingMessage: AgentMessage | undefined,
+		sessionActions: AgentConnectionState["sessionActions"],
+	): void {
+		this.resetMermaidRerender();
+		const pendingPrompt = sessionActions.followUps.find(isMermaidRerenderPrompt);
+		if (pendingPrompt) this.mermaidRerenderPendingPrompt = pendingPrompt;
+		if (streamingMessage?.role !== "assistant") return;
+		let lastAssistantIndex = -1;
+		for (let index = messages.length - 1; index >= 0; index--) {
+			if (messages[index]?.role === "assistant") {
+				lastAssistantIndex = index;
+				break;
+			}
+		}
+		for (const message of messages.slice(lastAssistantIndex + 1)) {
+			if (message.role !== "user") continue;
+			const text = this.getUserMessageText(message);
+			if (!isMermaidRerenderPrompt(text)) continue;
+			this.mermaidRerenderPendingPrompt = text;
+			this.suppressMermaidRerenderForAgentRun = true;
+			return;
+		}
+	}
+
+	private handleFinalMarkdownTransformIssue(issue: MarkdownTransformIssue): void {
+		if (
+			issue.type !== "mermaid-width-overflow" ||
+			this.mermaidRerenderPendingPrompt ||
+			this.suppressMermaidRerenderForAgentRun ||
+			this.shutdownRequested
+		) {
+			return;
+		}
+
+		// Latch synchronously because a single answer can contain multiple wide diagrams
+		// and the Markdown renderer can run again before prompt admission completes.
+		const prompt = [
+			MERMAID_RERENDER_PROMPT_PREFIX,
+			"The Mermaid diagram in your immediately preceding response does not fit the terminal.",
+			`It renders at ${issue.renderedWidth} columns, but only ${issue.availableWidth} columns are available.`,
+			"Re-render every oversized Mermaid diagram using a narrower layout (prefer flowchart TB/TD instead of LR/RL and shorten labels only when necessary).",
+			"Preserve the information and respond with the corrected Mermaid fenced block only. Do not repeat the oversized version.",
+		].join("\n");
+		this.mermaidRerenderPendingPrompt = prompt;
+		const generation = this.sessionEventGeneration;
+		queueMicrotask(() => {
+			if (
+				this.mermaidRerenderPendingPrompt !== prompt ||
+				this.shutdownRequested ||
+				generation !== this.sessionEventGeneration
+			) {
+				return;
+			}
+
+			const admissionAbort = new AbortController();
+			this.mermaidRerenderAdmissionAbort = admissionAbort;
+
+			void this.agentConnection
+				.prompt(prompt, {
+					streamingBehavior: "followUp",
+					followUpQueueKey: MERMAID_RERENDER_FOLLOW_UP_QUEUE_KEY,
+					followUpQueueKeyLifetime: "action",
+					internalPrompt: true,
+					queueIfBusy: true,
+					source: "extension",
+					signal: admissionAbort.signal,
+				})
+				.catch((error) => {
+					if (
+						error instanceof AgentConnectionPromptAdmissionError &&
+						(error.status === "cancelled" || error.status === "unsupported") &&
+						this.mermaidRerenderPendingPrompt === prompt
+					) {
+						this.mermaidRerenderPendingPrompt = undefined;
+					}
+					if (!admissionAbort.signal.aborted) {
+						this.showWarning(
+							`Could not request a narrower Mermaid diagram: ${error instanceof Error ? error.message : String(error)}`,
+						);
+					}
+				})
+				.finally(() => {
+					if (this.mermaidRerenderAdmissionAbort === admissionAbort) {
+						this.mermaidRerenderAdmissionAbort = undefined;
+					}
+				});
+		});
 	}
 
 	// =========================================================================
@@ -2843,6 +2953,7 @@ export class InteractiveMode {
 	}
 
 	private resetCurrentSessionRenderState(options?: { clearPromptStash?: boolean }): void {
+		this.resetMermaidRerender();
 		this.endFeatureHintRun();
 		this.chatContainer.clear();
 		this.shortcutGuideContainer.clear();
@@ -2923,7 +3034,13 @@ export class InteractiveMode {
 		this.streamingMessage = undefined;
 		this.rlmNodeId = snapshot.parent?.childId;
 		this.replaceSubagentSummary(snapshot.children);
-		await this.renderSessionContext(this.getSessionContextFromConnectionSnapshot(snapshot), {
+		const context = this.getSessionContextFromConnectionSnapshot(snapshot);
+		this.restoreMermaidRerenderSuppression(
+			context.messages,
+			snapshot.streamingMessage,
+			snapshot.state.sessionActions,
+		);
+		await this.renderSessionContext(context, {
 			clearChat: true,
 			updateFooter: true,
 		});
@@ -5324,6 +5441,13 @@ export class InteractiveMode {
 		// reset with it. (agent_start on auto-retry does not reset the tracker.)
 		if (event.type === "message_start") {
 			this.prepareFeatureHintRun(event.message);
+			if (event.message.role === "user") {
+				const text = this.getUserMessageText(event.message);
+				if (isMermaidRerenderPrompt(text)) {
+					this.mermaidRerenderPendingPrompt = text;
+					this.suppressMermaidRerenderForAgentRun = true;
+				}
+			}
 		}
 		if (event.type === "message_start" && (event.message.role === "user" || isAgentSessionMessage(event.message))) {
 			this.contextUsageTokenBaseline = 0;
@@ -5606,6 +5730,9 @@ export class InteractiveMode {
 				this.flushPendingBashComponents();
 				this.resetPendingToolState();
 				this.renderRecap();
+				if (this.suppressMermaidRerenderForAgentRun) {
+					this.resetMermaidRerender();
+				}
 
 				this.applyOptimisticContextUsage();
 				// Auto-compaction can start server-side while this event is being handled.
@@ -5733,6 +5860,9 @@ export class InteractiveMode {
 			{
 				expanded: this.toolOutputExpanded,
 				markdownTransformers: this.getMarkdownTransformers(),
+				onFinalMarkdownTransformIssue: this.suppressMermaidRerenderForAgentRun
+					? undefined
+					: (issue) => this.handleFinalMarkdownTransformIssue(issue),
 				precededByToolActivity:
 					this.chatContainer.children.at(-1) instanceof ToolExecutionComponent ||
 					this.chatContainer.children.at(-1) instanceof AgentMessageComponent,
@@ -6560,6 +6690,7 @@ export class InteractiveMode {
 		this.seedSubagentSummary(snapshot.children);
 		this.setSessionHasMessages(context.messages.length > 0);
 		this.applyConnectionStateSnapshot(state);
+		this.restoreMermaidRerenderSuppression(context.messages, streamingMessage, state.sessionActions);
 		await this.renderSessionContext(context, {
 			updateFooter: true,
 			populateHistory: true,

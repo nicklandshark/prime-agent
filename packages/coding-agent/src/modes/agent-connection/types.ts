@@ -447,6 +447,12 @@ export class AgentConnectionPromptAdmissionError extends Error {
 export interface AgentConnectionPromptOptions {
 	images?: ImageContent[];
 	streamingBehavior?: "steer" | "followUp";
+	/** Coalesce follow-ups by a session-scoped key. */
+	followUpQueueKey?: string;
+	/** Keep the key reserved only while pending (default) or through action completion. */
+	followUpQueueKeyLifetime?: "pending" | "action";
+	/** Bypass extension, slash-command, and template interception for host-generated prompts. */
+	internalPrompt?: boolean;
 	queueIfBusy?: boolean;
 	source?: InputSource;
 	/** Cancel admission while it is still waiting; accepted prompts remain session-owned. */

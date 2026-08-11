@@ -711,17 +711,26 @@ describe("DaemonAgentConnection", () => {
 		});
 	});
 
-	it("forwards queueIfBusy for prompt admission", async () => {
+	it("forwards follow-up coalescing options for prompt admission", async () => {
 		const fakeClient = new FakeDaemonClient();
 		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
 
-		await connection.prompt("queued input", { streamingBehavior: "followUp", queueIfBusy: true });
+		await connection.prompt("queued input", {
+			streamingBehavior: "followUp",
+			followUpQueueKey: "mermaid:rerender",
+			followUpQueueKeyLifetime: "action",
+			internalPrompt: true,
+			queueIfBusy: true,
+		});
 
 		expect(fakeClient.requests.at(-1)).toMatchObject({
 			type: "prompt",
 			activeSessionId: "active-1",
 			message: "queued input",
 			streamingBehavior: "followUp",
+			followUpQueueKey: "mermaid:rerender",
+			followUpQueueKeyLifetime: "action",
+			internalPrompt: true,
 			queueIfBusy: true,
 		});
 	});
@@ -731,12 +740,21 @@ describe("DaemonAgentConnection", () => {
 		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
 		const abort = new AbortController();
 
-		await connection.prompt("startup", { signal: abort.signal, queueIfBusy: true });
+		await connection.prompt("startup", {
+			signal: abort.signal,
+			followUpQueueKey: "mermaid:rerender",
+			followUpQueueKeyLifetime: "action",
+			internalPrompt: true,
+			queueIfBusy: true,
+		});
 
 		expect(fakeClient.requests.at(-1)).toMatchObject({
 			type: "prompt",
 			activeSessionId: "active-1",
 			message: "startup",
+			followUpQueueKey: "mermaid:rerender",
+			followUpQueueKeyLifetime: "action",
+			internalPrompt: true,
 			queueIfBusy: true,
 			admissionId: expect.stringMatching(/^prompt-admission:/),
 		});

@@ -8908,13 +8908,22 @@ describe("daemon mode helpers", () => {
 			activeSessionId: state.activeSessionId,
 			message: "legacy prompt",
 			streamingBehavior: "followUp",
+			followUpQueueKey: "mermaid:rerender",
+			followUpQueueKeyLifetime: "action",
+			internalPrompt: true,
 		});
 
 		await vi.waitFor(() => expect(write).toHaveBeenCalledOnce());
 		expect(JSON.parse(String(write.mock.calls[0]?.[0]))).toMatchObject({ success: true, command: "prompt" });
 		expect(promptUntilAccepted).toHaveBeenCalledWith(
 			"legacy prompt",
-			expect.objectContaining({ streamingBehavior: "followUp", queueIfBusy: true }),
+			expect.objectContaining({
+				streamingBehavior: "followUp",
+				followUpQueueKey: "mermaid:rerender",
+				followUpQueueKeyLifetime: "action",
+				internalPrompt: true,
+				queueIfBusy: true,
+			}),
 		);
 	});
 

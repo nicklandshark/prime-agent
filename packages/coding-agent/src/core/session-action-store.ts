@@ -60,6 +60,7 @@ export interface SessionAction<TPayload extends SessionActionPayload = SessionAc
 	payload: TPayload;
 	lifecycle: ActionLifecycle;
 	queueKey?: string;
+	queueKeyLifetime?: "pending" | "action";
 	agentMessageId?: string;
 	suppressAutonomousContinuation?: boolean;
 }

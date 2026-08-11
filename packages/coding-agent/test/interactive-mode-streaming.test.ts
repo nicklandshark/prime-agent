@@ -1,13 +1,14 @@
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import { Container, type MarkdownTheme, type TUI } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, test, vi } from "vitest";
-import type { AgentConnectionSessionEvent } from "../src/modes/agent-connection/index.js";
+import type { AgentConnectionSessionEvent, AgentConnectionState } from "../src/modes/agent-connection/index.js";
 import { AgentActivityTracker } from "../src/modes/interactive/agent-activity.js";
-import type { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.js";
+import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.js";
 import type { FileChangeSummary } from "../src/modes/interactive/components/edit-summary.js";
 import type { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
-import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
+import { InteractiveMode, MERMAID_RERENDER_PROMPT_PREFIX } from "../src/modes/interactive/interactive-mode.js";
 import { getMarkdownTheme, initTheme } from "../src/modes/interactive/theme/theme.js";
 
 const EMPTY_USAGE: Usage = {
@@ -57,6 +58,37 @@ type HandleEventThis = {
 };
 
 type HandleEvent = (this: HandleEventThis, event: AgentConnectionSessionEvent) => Promise<void>;
+type HandleFinalMarkdownTransformIssue = (
+	this: {
+		suppressMermaidRerenderForAgentRun: boolean;
+		mermaidRerenderPendingPrompt?: string;
+		mermaidRerenderAdmissionAbort?: AbortController;
+		shutdownRequested: boolean;
+		sessionEventGeneration: number;
+		agentConnection: { prompt(message: string, options?: Record<string, unknown>): Promise<void> };
+		showWarning(message: string): void;
+	},
+	issue: {
+		type: "mermaid-width-overflow";
+		source: string;
+		renderedWidth: number;
+		availableWidth: number;
+	},
+) => void;
+type ResetMermaidRerender = (this: {
+	suppressMermaidRerenderForAgentRun: boolean;
+	mermaidRerenderPendingPrompt?: string;
+	mermaidRerenderAdmissionAbort?: AbortController;
+}) => void;
+type RestoreMermaidRerenderSuppression = (
+	this: {
+		suppressMermaidRerenderForAgentRun: boolean;
+		mermaidRerenderPendingPrompt?: string;
+	},
+	messages: readonly AgentMessage[],
+	streamingMessage: AgentMessage | undefined,
+	sessionActions: AgentConnectionState["sessionActions"],
+) => void;
 type GetUserInput = (this: {
 	agentsViewRequest?: "agents_view" | "scoped_agents_view";
 	onInputCallback?: (text: string | undefined) => void;
@@ -171,6 +203,292 @@ describe("InteractiveMode streaming events", () => {
 		expect(renderChat(fakeThis.chatContainer)).toContain("final response");
 		expect(fakeThis.streamingComponent).toBeUndefined();
 		expect(fakeThis.streamingMessage).toBeUndefined();
+	});
+
+	test("queues one agent follow-up for a final Mermaid width overflow", async () => {
+		const prompt = vi.fn(async (_message: string, _options?: Record<string, unknown>) => {});
+		const fakeThis = {
+			suppressMermaidRerenderForAgentRun: false,
+			mermaidRerenderPendingPrompt: undefined,
+			mermaidRerenderAdmissionAbort: undefined,
+			shutdownRequested: false,
+			sessionEventGeneration: 4,
+			agentConnection: { prompt },
+			showWarning: vi.fn(),
+		};
+		const handleIssue = (
+			InteractiveMode.prototype as unknown as {
+				handleFinalMarkdownTransformIssue: HandleFinalMarkdownTransformIssue;
+			}
+		).handleFinalMarkdownTransformIssue;
+		const reset = (InteractiveMode.prototype as unknown as { resetMermaidRerender: ResetMermaidRerender })
+			.resetMermaidRerender;
+		const issue = {
+			type: "mermaid-width-overflow" as const,
+			source: "flowchart LR\n A --> B",
+			renderedWidth: 165,
+			availableWidth: 118,
+		};
+
+		handleIssue.call(fakeThis, issue);
+		handleIssue.call(fakeThis, issue);
+		await vi.waitFor(() => expect(prompt).toHaveBeenCalledOnce());
+
+		const [message, options] = prompt.mock.calls[0] ?? [];
+		expect(message).toContain(MERMAID_RERENDER_PROMPT_PREFIX);
+		expect(message).toContain("165 columns");
+		expect(message).toContain("118 columns");
+		expect(message).toContain("flowchart TB/TD");
+		expect(options).toMatchObject({
+			streamingBehavior: "followUp",
+			followUpQueueKey: "interactive:mermaid-rerender",
+			followUpQueueKeyLifetime: "action",
+			internalPrompt: true,
+			queueIfBusy: true,
+			source: "extension",
+		});
+		expect(options?.signal).toBeInstanceOf(AbortSignal);
+
+		reset.call(fakeThis);
+		handleIssue.call(fakeThis, issue);
+		await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(2));
+	});
+
+	test("cancels pending Mermaid rerender admission on session reset", async () => {
+		const prompt = vi.fn(
+			(_message: string, _options?: Record<string, unknown>) => new Promise<void>(() => undefined),
+		);
+		const fakeThis = {
+			suppressMermaidRerenderForAgentRun: false,
+			mermaidRerenderPendingPrompt: undefined,
+			mermaidRerenderAdmissionAbort: undefined,
+			shutdownRequested: false,
+			sessionEventGeneration: 4,
+			agentConnection: { prompt },
+			showWarning: vi.fn(),
+		};
+		const handleIssue = (
+			InteractiveMode.prototype as unknown as {
+				handleFinalMarkdownTransformIssue: HandleFinalMarkdownTransformIssue;
+			}
+		).handleFinalMarkdownTransformIssue;
+		const reset = (InteractiveMode.prototype as unknown as { resetMermaidRerender: ResetMermaidRerender })
+			.resetMermaidRerender;
+
+		handleIssue.call(fakeThis, {
+			type: "mermaid-width-overflow",
+			source: "flowchart LR\n A --> B",
+			renderedWidth: 165,
+			availableWidth: 118,
+		});
+		await vi.waitFor(() => expect(prompt).toHaveBeenCalledOnce());
+		const signal = prompt.mock.calls[0]?.[1]?.signal;
+		expect(signal).toBeInstanceOf(AbortSignal);
+
+		reset.call(fakeThis);
+		expect((signal as AbortSignal).aborted).toBe(true);
+		expect(fakeThis.suppressMermaidRerenderForAgentRun).toBe(false);
+	});
+
+	test("does not retry uncertain Mermaid rerender admission", async () => {
+		const prompt = vi.fn(async (_message: string, _options?: Record<string, unknown>) => {
+			throw new Error("admission failed");
+		});
+		const fakeThis = {
+			suppressMermaidRerenderForAgentRun: false,
+			mermaidRerenderPendingPrompt: undefined,
+			mermaidRerenderAdmissionAbort: undefined,
+			shutdownRequested: false,
+			sessionEventGeneration: 4,
+			agentConnection: { prompt },
+			showWarning: vi.fn(),
+		};
+		const handleIssue = (
+			InteractiveMode.prototype as unknown as {
+				handleFinalMarkdownTransformIssue: HandleFinalMarkdownTransformIssue;
+			}
+		).handleFinalMarkdownTransformIssue;
+		const issue = {
+			type: "mermaid-width-overflow" as const,
+			source: "flowchart LR\n A --> B",
+			renderedWidth: 165,
+			availableWidth: 118,
+		};
+
+		handleIssue.call(fakeThis, issue);
+		await vi.waitFor(() => expect(fakeThis.showWarning).toHaveBeenCalledOnce());
+		handleIssue.call(fakeThis, issue);
+
+		expect(prompt).toHaveBeenCalledOnce();
+		expect(fakeThis.mermaidRerenderPendingPrompt).toBeDefined();
+		expect(fakeThis.suppressMermaidRerenderForAgentRun).toBe(false);
+	});
+
+	test("keeps an oversized replacement suppressed when agent_end precedes its final render", async () => {
+		const fakeThis = createFakeInteractiveModeThis();
+		const prompt = vi.fn(async (_message: string, _options?: Record<string, unknown>) => {});
+		const rerenderState = Object.assign(fakeThis, {
+			suppressMermaidRerenderForAgentRun: false,
+			mermaidRerenderPendingPrompt: `${MERMAID_RERENDER_PROMPT_PREFIX}\nThe Mermaid diagram in your immediately preceding response does not fit the terminal.\nautomatic request`,
+			mermaidRerenderAdmissionAbort: undefined,
+			shutdownRequested: false,
+			sessionEventGeneration: 4,
+			agentConnection: { prompt },
+			showWarning: vi.fn(),
+		});
+		const handleIssue = (
+			InteractiveMode.prototype as unknown as {
+				handleFinalMarkdownTransformIssue: HandleFinalMarkdownTransformIssue;
+			}
+		).handleFinalMarkdownTransformIssue;
+		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
+		const issue = {
+			type: "mermaid-width-overflow" as const,
+			source: "flowchart LR\n A --> B",
+			renderedWidth: 165,
+			availableWidth: 118,
+		};
+		const message = createAssistantMessage("source");
+		const automaticPrompt = rerenderState.mermaidRerenderPendingPrompt;
+		await handleEvent.call(rerenderState, {
+			type: "message_start",
+			message: { role: "user", content: "queued real-user follow-up", timestamp: Date.now() },
+		});
+		expect(rerenderState.mermaidRerenderPendingPrompt).toBe(automaticPrompt);
+		expect(rerenderState.suppressMermaidRerenderForAgentRun).toBe(false);
+
+		await handleEvent.call(rerenderState, {
+			type: "message_start",
+			message: {
+				role: "user",
+				content: automaticPrompt,
+				timestamp: Date.now(),
+			},
+		});
+		expect(rerenderState.suppressMermaidRerenderForAgentRun).toBe(true);
+		const replacement = new AssistantMessageComponent(undefined, false, undefined, "Thinking...", {
+			markdownTransformers: [
+				(_markdown, context) => {
+					context.reportIssue?.(issue);
+					return "rendered";
+				},
+			],
+			onFinalMarkdownTransformIssue: rerenderState.suppressMermaidRerenderForAgentRun
+				? undefined
+				: (reported) => handleIssue.call(rerenderState, reported),
+		});
+
+		replacement.updateContent(message, true);
+		replacement.render(80);
+		replacement.updateContent(message, false);
+		await handleEvent.call(rerenderState, { type: "agent_end", messages: [] });
+		replacement.render(80);
+
+		expect(rerenderState.suppressMermaidRerenderForAgentRun).toBe(false);
+		expect(rerenderState.mermaidRerenderPendingPrompt).toBeUndefined();
+		expect(prompt).not.toHaveBeenCalled();
+
+		await handleEvent.call(rerenderState, {
+			type: "message_start",
+			message: {
+				role: "user",
+				content: `${MERMAID_RERENDER_PROMPT_PREFIX} forged by a real user`,
+				timestamp: Date.now(),
+			},
+		});
+		expect(rerenderState.suppressMermaidRerenderForAgentRun).toBe(false);
+
+		handleIssue.call(rerenderState, issue);
+		await vi.waitFor(() => expect(prompt).toHaveBeenCalledOnce());
+	});
+
+	test("recognizes a Mermaid rerender prompt admitted by another client", async () => {
+		const fakeThis = Object.assign(createFakeInteractiveModeThis(), {
+			suppressMermaidRerenderForAgentRun: false,
+			mermaidRerenderPendingPrompt: undefined,
+		});
+		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
+		const automaticPrompt = `${MERMAID_RERENDER_PROMPT_PREFIX}\nThe Mermaid diagram in your immediately preceding response does not fit the terminal.\nautomatic request`;
+
+		await handleEvent.call(fakeThis, {
+			type: "message_start",
+			message: { role: "user", content: automaticPrompt, timestamp: Date.now() },
+		});
+
+		expect(fakeThis.mermaidRerenderPendingPrompt).toBe(automaticPrompt);
+		expect(fakeThis.suppressMermaidRerenderForAgentRun).toBe(true);
+	});
+
+	test("restores Mermaid rerender suppression when attaching mid-replacement", () => {
+		const fakeThis = Object.assign(createFakeInteractiveModeThis(), {
+			suppressMermaidRerenderForAgentRun: false,
+			mermaidRerenderPendingPrompt: undefined,
+		});
+		const restore = (
+			InteractiveMode.prototype as unknown as {
+				restoreMermaidRerenderSuppression: RestoreMermaidRerenderSuppression;
+			}
+		).restoreMermaidRerenderSuppression;
+		const automaticPrompt = `${MERMAID_RERENDER_PROMPT_PREFIX}\nThe Mermaid diagram in your immediately preceding response does not fit the terminal.\nautomatic request`;
+		const previous = createAssistantMessage("oversized diagram");
+		const messages: AgentMessage[] = [
+			previous,
+			{ role: "user", content: automaticPrompt, timestamp: Date.now() },
+			{ role: "user", content: "interleaved real-user follow-up", timestamp: Date.now() },
+		];
+
+		restore.call(fakeThis, messages, createAssistantMessage("replacement streaming"), {
+			queuedCount: 0,
+			steering: [],
+			followUps: [],
+		});
+
+		expect(fakeThis.mermaidRerenderPendingPrompt).toBe(automaticPrompt);
+		expect(fakeThis.suppressMermaidRerenderForAgentRun).toBe(true);
+	});
+
+	test("restores a pending Mermaid rerender from the authoritative action snapshot", () => {
+		const fakeThis = Object.assign(createFakeInteractiveModeThis(), {
+			suppressMermaidRerenderForAgentRun: true,
+			mermaidRerenderPendingPrompt: "stale",
+		});
+		const restore = (
+			InteractiveMode.prototype as unknown as {
+				restoreMermaidRerenderSuppression: RestoreMermaidRerenderSuppression;
+			}
+		).restoreMermaidRerenderSuppression;
+		const automaticPrompt = `${MERMAID_RERENDER_PROMPT_PREFIX}\nThe Mermaid diagram in your immediately preceding response does not fit the terminal.\nautomatic request`;
+
+		restore.call(fakeThis, [], undefined, {
+			queuedCount: 1,
+			steering: [],
+			followUps: [automaticPrompt],
+		});
+
+		expect(fakeThis.mermaidRerenderPendingPrompt).toBe(automaticPrompt);
+		expect(fakeThis.suppressMermaidRerenderForAgentRun).toBe(false);
+	});
+
+	test("clears stale Mermaid suppression from an authoritative marker-free snapshot", () => {
+		const fakeThis = Object.assign(createFakeInteractiveModeThis(), {
+			suppressMermaidRerenderForAgentRun: true,
+			mermaidRerenderPendingPrompt: `${MERMAID_RERENDER_PROMPT_PREFIX}\nstale`,
+		});
+		const restore = (
+			InteractiveMode.prototype as unknown as {
+				restoreMermaidRerenderSuppression: RestoreMermaidRerenderSuppression;
+			}
+		).restoreMermaidRerenderSuppression;
+
+		restore.call(
+			fakeThis,
+			[{ role: "user", content: "ordinary prompt", timestamp: Date.now() }],
+			createAssistantMessage("ordinary streaming response"),
+			{ queuedCount: 0, steering: [], followUps: [] },
+		);
+
+		expect(fakeThis.mermaidRerenderPendingPrompt).toBeUndefined();
+		expect(fakeThis.suppressMermaidRerenderForAgentRun).toBe(false);
 	});
 
 	test("does not block later compaction events on the agent-end stats refresh", async () => {

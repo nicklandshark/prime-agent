@@ -1625,6 +1625,65 @@ describe("AgentSession queue characterization", () => {
 		expect(getUserTexts(harness)).toEqual(["first heartbeat", "second heartbeat"]);
 	});
 
+	it("coalesces a same-key follow-up through the running action when requested", async () => {
+		const replacementRelease = createDeferred();
+		const replacementStarted = createDeferred();
+		const holdReplacement: AgentTool = {
+			name: "hold_replacement",
+			label: "Hold replacement",
+			description: "Keep the replacement action running",
+			parameters: Type.Object({}),
+			execute: async () => {
+				replacementStarted.resolve();
+				await replacementRelease.promise;
+				return { content: [{ type: "text", text: "released" }], details: {} };
+			},
+		};
+		const waiting = await createWaitingHarness({ tools: [holdReplacement] });
+		const { harness, waitForToolStart, promptPromise, releaseToolExecution } = waiting;
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("initial done"),
+			fauxAssistantMessage(fauxToolCall("hold_replacement", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("replacement done"),
+			fauxAssistantMessage("later replacement done"),
+		]);
+		await waitForToolStart;
+
+		expect(
+			await harness.session.followUp("first rerender", undefined, {
+				queueKey: "mermaid-rerender",
+				queueKeyLifetime: "action",
+			}),
+		).toBe(true);
+		releaseToolExecution();
+		await replacementStarted.promise;
+		expect(harness.session.getSessionActionSnapshot().active?.phase).toBe("running");
+
+		expect(
+			await harness.session.followUp("duplicate rerender", undefined, {
+				queueKey: "mermaid-rerender",
+			}),
+		).toBe(false);
+		expect(harness.session.getFollowUpMessages()).toEqual([]);
+
+		replacementRelease.resolve();
+		await promptPromise;
+		await harness.session.waitForIdle();
+		expect(getUserTexts(harness)).toEqual(["start", "first rerender"]);
+
+		expect(
+			await harness.session.followUp("later rerender", undefined, {
+				queueKey: "mermaid-rerender",
+				queueKeyLifetime: "action",
+				resumeIfIdle: true,
+			}),
+		).toBe(true);
+		await harness.session.waitForIdle();
+		expect(getUserTexts(harness)).toEqual(["start", "first rerender", "later rerender"]);
+	});
+
 	it("does not reclaim a handed-off action before its delivery event", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
@@ -3118,7 +3177,10 @@ describe("AgentSession scheduler scenarios", () => {
 		// Phase 1: queue a follow-up, a command with images, and an agent-message prompt mid-run.
 		const first = harness.session.prompt("first");
 		await vi.waitFor(() => expect(harness.session.isStreaming).toBe(true));
-		await harness.session.followUp("queued for restart");
+		await harness.session.followUp("queued for restart", undefined, {
+			queueKey: "mermaid-rerender",
+			queueKeyLifetime: "action",
+		});
 		const image = { type: "image" as const, mimeType: "image/png", data: "image-data" };
 		await harness.session.prompt("/goal inspect image", { streamingBehavior: "followUp", images: [image] });
 		const agentPrompt = agentPromptText("agentmsg_abort", "survive the abort");
@@ -3143,7 +3205,11 @@ describe("AgentSession scheduler scenarios", () => {
 		expect(providerCalls).toBe(0);
 		expect(harness.session.getFollowUpMessages()).toEqual(["queued for restart", "/goal inspect image", agentPrompt]);
 		expect(harness.session.getSessionActionRecoverySnapshot().actions).toEqual([
-			expect.objectContaining({ payload: expect.objectContaining({ text: "queued for restart" }) }),
+			expect.objectContaining({
+				queueKey: "mermaid-rerender",
+				queueKeyLifetime: "action",
+				payload: expect.objectContaining({ text: "queued for restart" }),
+			}),
 			expect.objectContaining({
 				payload: expect.objectContaining({ text: "/goal inspect image", images: [image] }),
 			}),

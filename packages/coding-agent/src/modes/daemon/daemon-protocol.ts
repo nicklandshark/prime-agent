@@ -396,6 +396,9 @@ export type DaemonCommand =
 			content?: (TextContent | ImageContent)[];
 			images?: ImageContent[];
 			streamingBehavior?: "steer" | "followUp";
+			followUpQueueKey?: string;
+			followUpQueueKeyLifetime?: "pending" | "action";
+			internalPrompt?: boolean;
 			queueIfBusy?: boolean;
 			expandPromptTemplates?: boolean;
 			source?: InputSource;
@@ -418,6 +421,9 @@ export type DaemonCommand =
 			content?: (TextContent | ImageContent)[];
 			images?: ImageContent[];
 			streamingBehavior?: "steer" | "followUp";
+			followUpQueueKey?: string;
+			followUpQueueKeyLifetime?: "pending" | "action";
+			internalPrompt?: boolean;
 			queueIfBusy?: boolean;
 			expandPromptTemplates?: boolean;
 			source?: InputSource;

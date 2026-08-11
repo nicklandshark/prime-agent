@@ -11,8 +11,17 @@ interface MermaidTransformerOptions {
 	theme?: Theme;
 }
 
-function isMermaid(token: Token): token is Token & { type: "code"; text: string; lang?: string } {
+function isMermaid(token: Token): token is Token & { type: "code"; raw: string; text: string; lang?: string } {
 	return token.type === "code" && token.lang?.trim().split(/\s+/, 1)[0]?.toLowerCase() === "mermaid";
+}
+
+function hasClosingFence(raw: string): boolean {
+	const lines = raw.replaceAll("\r\n", "\n").split("\n");
+	const opening = /^ {0,3}(`{3,}|~{3,})/.exec(lines[0] ?? "");
+	if (!opening) return false;
+	const fence = opening[1];
+	const closing = new RegExp(`^ {0,3}${fence[0]}{${fence.length},}[ \t]*$`);
+	return lines.slice(1).some((line) => closing.test(line));
 }
 
 function codeSpan(line: string): string {
@@ -61,7 +70,23 @@ export function createMermaidMarkdownTransformer(options: MermaidTransformerOpti
 			.map((token) => {
 				if (!isMermaid(token)) return token.raw;
 				const art = render(token.text);
-				if (!art || art.width > context.availableWidth) return token.raw;
+				if (!art) return token.raw;
+				if (art.width > context.availableWidth) {
+					if (
+						!context.isStreaming &&
+						context.messageType === "assistant" &&
+						art.warnings.length === 0 &&
+						hasClosingFence(token.raw)
+					) {
+						context.reportIssue?.({
+							type: "mermaid-width-overflow",
+							source: token.text,
+							renderedWidth: art.width,
+							availableWidth: context.availableWidth,
+						});
+					}
+					return token.raw;
+				}
 				if (!context.isStreaming && art.warnings.length > 0) {
 					const suffix = art.warnings.length > 1 ? ` (+${art.warnings.length - 1} more)` : "";
 					const warning = `Mermaid diagram not rendered: ${art.warnings[0]}${suffix}`;

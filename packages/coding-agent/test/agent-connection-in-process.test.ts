@@ -173,6 +173,35 @@ describe("InProcessAgentConnection", () => {
 			finishTurn();
 		},
 	);
+	it("forwards follow-up coalescing to the session", async () => {
+		const session = createFakeSession("prompt-coalescing", []);
+		const prompt = vi.fn(async (_message: string, options?: PromptOptions) => {
+			options?.preflightResult?.(true, true);
+		});
+		Object.assign(session.session, { prompt });
+		const connection = new InProcessAgentConnection(asRuntime(new FakeRuntime(session.session)));
+
+		await connection.prompt("hello", {
+			streamingBehavior: "followUp",
+			followUpQueueKey: "mermaid:rerender",
+			followUpQueueKeyLifetime: "action",
+			internalPrompt: true,
+			queueIfBusy: true,
+		});
+
+		expect(prompt).toHaveBeenCalledWith(
+			"hello",
+			expect.objectContaining({
+				streamingBehavior: "followUp",
+				followUpQueueKey: "mermaid:rerender",
+				followUpQueueKeyLifetime: "action",
+				internalPrompt: true,
+				queueIfBusy: true,
+				preflightResult: expect.any(Function),
+			}),
+		);
+	});
+
 	it("forwards prompt admission cancellation to the session", async () => {
 		const session = createFakeSession("prompt-cancellation", []);
 		const prompt = vi.fn(
