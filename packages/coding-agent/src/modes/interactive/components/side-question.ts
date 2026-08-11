@@ -1,6 +1,7 @@
 import { Box, type Component, Markdown, Text, visibleWidth } from "@earendil-works/pi-tui";
 import type { AgentConnectionSideQuestionEvent } from "../../agent-connection/types.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
+import { createMarkdownTransform, type MarkdownTransformer } from "./markdown-transform.js";
 
 interface SideQuestionTurnState {
 	kind: "turn";
@@ -19,10 +20,16 @@ interface SideQuestionBashState {
 
 export class SideQuestionComponent implements Component {
 	private readonly paddingX: number;
+	private readonly markdownTransformers: readonly MarkdownTransformer[];
 	private readonly entries: (SideQuestionTurnState | SideQuestionBashState)[] = [];
 
-	constructor(event: AgentConnectionSideQuestionEvent, paddingX = 2) {
+	constructor(
+		event: AgentConnectionSideQuestionEvent,
+		paddingX = 2,
+		markdownTransformers: readonly MarkdownTransformer[] = [],
+	) {
 		this.paddingX = Math.max(2, paddingX);
+		this.markdownTransformers = markdownTransformers;
 		this.addTurn(event);
 	}
 
@@ -33,16 +40,36 @@ export class SideQuestionComponent implements Component {
 				theme.getUserMessageBackgroundColor()(content),
 			);
 			questionBubble.addChild(
-				new Markdown(event.question, 0, 0, getMarkdownTheme(), {
-					color: (content: string) => theme.fg("userMessageText", content),
-				}),
+				new Markdown(
+					event.question,
+					0,
+					0,
+					getMarkdownTheme(),
+					{
+						color: (content: string) => theme.fg("userMessageText", content),
+					},
+					{
+						transform: createMarkdownTransform("user", false, this.markdownTransformers),
+					},
+				),
 			);
 		}
-		const answer = new Markdown("", this.paddingX, 0, getMarkdownTheme(), {
-			color: (content: string) => theme.fg("userMessageText", content),
-		});
-		answer.setText(event.answer);
-		this.entries.push({ kind: "turn", event, questionBubble, answer });
+		this.entries.push({ kind: "turn", event, questionBubble, answer: this.createAnswer(event) });
+	}
+
+	private createAnswer(event: AgentConnectionSideQuestionEvent): Markdown {
+		return new Markdown(
+			event.answer,
+			this.paddingX,
+			0,
+			getMarkdownTheme(),
+			{
+				color: (content: string) => theme.fg("userMessageText", content),
+			},
+			{
+				transform: createMarkdownTransform("assistant", event.status === "running", this.markdownTransformers),
+			},
+		);
 	}
 
 	addBash(component: Component): void {
@@ -65,8 +92,13 @@ export class SideQuestionComponent implements Component {
 		if (!turn) {
 			return;
 		}
+		const streamingChanged = (turn.event.status === "running") !== (event.status === "running");
 		turn.event = event;
-		turn.answer.setText(event.answer);
+		if (streamingChanged) {
+			turn.answer = this.createAnswer(event);
+		} else {
+			turn.answer.setText(event.answer);
+		}
 	}
 
 	invalidate(): void {

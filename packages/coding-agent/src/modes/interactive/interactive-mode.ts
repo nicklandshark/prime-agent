@@ -4453,7 +4453,11 @@ export class InteractiveMode {
 		if (this.sideQuestionComponent) {
 			this.sideQuestionComponent.addTurn(event);
 		} else {
-			this.sideQuestionComponent = new SideQuestionComponent(event, this.settingsManager.getEditorPaddingX());
+			this.sideQuestionComponent = new SideQuestionComponent(
+				event,
+				this.settingsManager.getEditorPaddingX(),
+				this.getMarkdownTransformers(),
+			);
 			this.sideQuestionContainer.addChild(new Spacer(1));
 			this.sideQuestionContainer.addChild(this.sideQuestionComponent);
 		}

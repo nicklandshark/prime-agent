@@ -142,6 +142,12 @@ describe("Markdown math rendering", () => {
 		assert.ok(lines.some((line) => line.includes("prices $5,$10 listed")));
 	});
 
+	it("does not parse single-dollar math across a line break", () => {
+		const lines = renderPlain("Cost $5\nprice$ total");
+		assert.ok(lines.some((line) => line.includes("Cost $5")));
+		assert.ok(lines.some((line) => line.includes("price$ total")));
+	});
+
 	it("leaves unterminated display math as plain text while streaming", () => {
 		const lines = renderPlain("$$\ny_t = \\sum");
 		assert.ok(lines.some((line) => line.includes("$$")));

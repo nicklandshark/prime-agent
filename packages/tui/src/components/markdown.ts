@@ -99,7 +99,7 @@ function tokenizeInlineMath(source: string): MathToken | undefined {
 	}
 
 	const text = source.slice(opening.length, closingIndex);
-	if (!text) {
+	if (!text || (opening === "$" && text.includes("\n"))) {
 		return undefined;
 	}
 
