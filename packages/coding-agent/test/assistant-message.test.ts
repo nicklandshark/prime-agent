@@ -237,4 +237,19 @@ describe("AssistantMessageComponent streaming identity", () => {
 			expectIdentity(component, message, widths[i % widths.length]);
 		}
 	});
+
+	test("reconciles transformed Markdown when streaming becomes final", () => {
+		initTheme("dark");
+		const message = createAssistantMessage([{ type: "text", text: "source" }]);
+		const component = new AssistantMessageComponent(undefined, false, undefined, "Thinking...", {
+			markdownTransformers: [(_markdown, context) => (context.isStreaming ? "streaming version" : "final version")],
+		});
+
+		component.updateContent(message, true);
+		expect(stripAnsi(component.render(80).join("\n"))).toContain("streaming version");
+		component.updateContent(message, false);
+		const final = stripAnsi(component.render(80).join("\n"));
+		expect(final).toContain("final version");
+		expect(final).not.toContain("streaming version");
+	});
 });

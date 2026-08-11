@@ -18,6 +18,7 @@ import {
 } from "./compaction-outcome-message.js";
 import { InjectedPromptMessageComponent, isInjectedPromptMessage } from "./injected-prompt-message.js";
 import { IPythonCellComponent } from "./ipython-cell.js";
+import type { MarkdownTransformer } from "./markdown-transform.js";
 import { SlashCommandMessageComponent } from "./slash-command-message.js";
 import { SlashCommandResultMessageComponent } from "./slash-command-result-message.js";
 import {
@@ -34,6 +35,7 @@ export interface ConversationComponentsOptions {
 	toolOptions: ToolExecutionOptions;
 	getToolDefinition: (name: string) => ToolExecutionDefinition | undefined;
 	markdownTheme?: MarkdownTheme;
+	markdownTransformers?: readonly MarkdownTransformer[];
 	hideThinkingBlock?: boolean;
 	hiddenThinkingLabel?: string;
 	toolsExpanded?: boolean;
@@ -80,6 +82,7 @@ export function buildConversationComponents(
 					options.hiddenThinkingLabel ?? "Thinking...",
 					{
 						expanded,
+						markdownTransformers: options.markdownTransformers,
 						precededByToolActivity:
 							components.at(-1) instanceof ToolExecutionComponent ||
 							components.at(-1) instanceof AgentMessageComponent,
@@ -153,7 +156,14 @@ export function buildConversationComponents(
 			// An image-only prompt has no text; show a placeholder rather than dropping it.
 			const display = text || (hasContent ? "[image]" : "");
 			if (display) {
-				components.push(new UserMessageComponent(display, options.markdownTheme, options.isRecognizedSlashCommand));
+				components.push(
+					new UserMessageComponent(
+						display,
+						options.markdownTheme,
+						options.isRecognizedSlashCommand,
+						options.markdownTransformers,
+					),
+				);
 			}
 		}
 		// Non-conversational messages (bash/branch-summary/compaction/other custom) aren't shown.

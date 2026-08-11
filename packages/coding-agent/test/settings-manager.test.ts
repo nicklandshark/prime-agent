@@ -578,4 +578,35 @@ describe("SettingsManager", () => {
 			expect(manager.getTelemetryEnabled()).toBe(false);
 		});
 	});
+
+	describe("Mermaid rendering mode", () => {
+		it("defaults to streaming and reads persisted modes", () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getMermaidRenderingMode()).toBe("streaming");
+
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ markdown: { mermaid: "final" } }));
+			const finalManager = SettingsManager.create(projectDir, agentDir);
+			expect(finalManager.getMermaidRenderingMode()).toBe("final");
+		});
+
+		it("falls back to streaming for an invalid persisted value", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ markdown: { mermaid: "invalid" } }));
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getMermaidRenderingMode()).toBe("streaming");
+		});
+
+		it("persists changes without dropping other Markdown settings", async () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ markdown: { codeBlockIndent: "", mermaid: "off" } }),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setMermaidRenderingMode("final");
+			await manager.flush();
+
+			expect(manager.getMermaidRenderingMode()).toBe("final");
+			const saved = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8"));
+			expect(saved.markdown).toEqual({ codeBlockIndent: "", mermaid: "final" });
+		});
+	});
 });

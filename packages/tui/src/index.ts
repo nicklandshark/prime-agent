@@ -15,7 +15,7 @@ export { Editor, type EditorOptions, type EditorTheme } from "./components/edito
 export { Image, type ImageOptions, type ImageTheme } from "./components/image.js";
 export { Input } from "./components/input.js";
 export { Loader, type LoaderIndicatorOptions } from "./components/loader.js";
-export { type DefaultTextStyle, Markdown, type MarkdownTheme } from "./components/markdown.js";
+export { type DefaultTextStyle, Markdown, type MarkdownOptions, type MarkdownTheme } from "./components/markdown.js";
 export {
 	type SelectItem,
 	SelectList,
@@ -65,7 +65,7 @@ export {
 	setKittyProtocolActive,
 } from "./keys.js";
 // LaTeX math to Unicode conversion
-export { latexToUnicode } from "./latex.js";
+export { latexToUnicode, type RenderLatexOptions, renderLatex } from "./latex.js";
 // SGR mouse event parsing
 export {
 	isMouseSequence,

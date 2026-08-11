@@ -8,6 +8,7 @@ import {
 	shouldCollapseErrorDetails,
 	summarizeErrorDetails,
 } from "./collapsible-error.js";
+import { createMarkdownTransform, type MarkdownTransformer } from "./markdown-transform.js";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -17,6 +18,7 @@ const LOGIN_RECOVERY_SUFFIX = `\n\n${LOGIN_RECOVERY_MESSAGE}`;
 export interface AssistantMessageComponentOptions {
 	expanded?: boolean;
 	precededByToolActivity?: boolean;
+	markdownTransformers?: readonly MarkdownTransformer[];
 }
 
 function getThinkingMarkdownTheme(baseTheme: MarkdownTheme): MarkdownTheme {
@@ -70,6 +72,8 @@ export class AssistantMessageComponent extends Container {
 	private blockMarkdowns = new Map<number, Markdown>();
 	private lastBlockTexts = new Map<number, string>();
 	private precededByToolActivity: boolean;
+	private markdownTransformers: readonly MarkdownTransformer[];
+	private isStreaming = false;
 
 	constructor(
 		message?: AssistantMessage,
@@ -85,6 +89,7 @@ export class AssistantMessageComponent extends Container {
 		this.hiddenThinkingLabel = hiddenThinkingLabel;
 		this.expanded = options.expanded ?? false;
 		this.precededByToolActivity = options.precededByToolActivity ?? false;
+		this.markdownTransformers = options.markdownTransformers ?? [];
 
 		// Container for text/thinking content
 		this.contentContainer = new Container();
@@ -136,8 +141,9 @@ export class AssistantMessageComponent extends Container {
 		return lines;
 	}
 
-	updateContent(message: AssistantMessage): void {
+	updateContent(message: AssistantMessage, isStreaming = this.isStreaming): void {
 		this.lastMessage = message;
+		this.isStreaming = isStreaming;
 		this.dirty = true;
 	}
 
@@ -160,6 +166,7 @@ export class AssistantMessageComponent extends Container {
 		}
 		parts.push(
 			`hide:${this.hideThinkingBlock}`,
+			`streaming:${this.isStreaming}`,
 			`label:${this.hiddenThinkingLabel}`,
 			`expanded:${this.expanded}`,
 			`stop:${message.stopReason ?? ""}`,
@@ -213,7 +220,9 @@ export class AssistantMessageComponent extends Container {
 			if (content.type === "text" && content.text.trim()) {
 				// Assistant text messages with no background - trim the text
 				// Set paddingY=0 to avoid extra spacing before tool executions
-				const markdown = new Markdown(content.text.trim(), 1, 0, this.markdownTheme);
+				const markdown = new Markdown(content.text.trim(), 1, 0, this.markdownTheme, undefined, {
+					transform: createMarkdownTransform("assistant", this.isStreaming, this.markdownTransformers),
+				});
 				this.blockMarkdowns.set(i, markdown);
 				this.lastBlockTexts.set(i, content.text.trim());
 				this.contentContainer.addChild(markdown);
@@ -241,6 +250,13 @@ export class AssistantMessageComponent extends Container {
 						getThinkingMarkdownTheme(this.markdownTheme),
 						{
 							color: (text: string) => theme.fg("thinkingText", text),
+						},
+						{
+							transform: createMarkdownTransform(
+								"assistant-thinking",
+								this.isStreaming,
+								this.markdownTransformers,
+							),
 						},
 					);
 					this.blockMarkdowns.set(i, markdown);

@@ -98,7 +98,9 @@ describe("latexToUnicode", () => {
 describe("Markdown math rendering", () => {
 	it("renders \\[ ... \\] display math as a Unicode block", () => {
 		const lines = renderPlain("Intro:\n\n\\[\ny_t = \\sum_{k=0}^{W-1} w_k \\odot x_{t-k}\n\\]\n\nAfter.");
-		assert.ok(lines.some((line) => line.includes("yₜ = ∑ₖ₌₀ᵂ⁻¹ wₖ ⊙ xₜ₋ₖ")));
+		assert.ok(lines.some((line) => line.includes("W-1")));
+		assert.ok(lines.some((line) => line.includes("yₜ = ∑  wₖ ⊙ xₜ₋ₖ")));
+		assert.ok(lines.some((line) => line.includes("k=0")));
 		assert.ok(!lines.some((line) => line.includes("\\sum")));
 		assert.ok(lines.some((line) => line.includes("After.")));
 	});
@@ -140,6 +142,12 @@ describe("Markdown math rendering", () => {
 		assert.ok(lines.some((line) => line.includes("prices $5,$10 listed")));
 	});
 
+	it("does not parse single-dollar math across a line break", () => {
+		const lines = renderPlain("Cost $5\nprice$ total");
+		assert.ok(lines.some((line) => line.includes("Cost $5")));
+		assert.ok(lines.some((line) => line.includes("price$ total")));
+	});
+
 	it("leaves unterminated display math as plain text while streaming", () => {
 		const lines = renderPlain("$$\ny_t = \\sum");
 		assert.ok(lines.some((line) => line.includes("$$")));
@@ -154,7 +162,9 @@ describe("Markdown math rendering", () => {
 		const lines = renderPlain(
 			"1. The sum:\n\n   \\[\n   \\sum_{k=1}^{n} k = \\frac{n(n+1)}{2}\n   \\]\n\n2. Next item",
 		);
-		assert.ok(lines.some((line) => line.includes("∑ₖ₌₁ⁿ k = (n(n+1))/2")));
+		assert.ok(lines.some((line) => line.includes("n(n+1)")));
+		assert.ok(lines.some((line) => line.includes("∑  k = ─")));
+		assert.ok(lines.some((line) => line.includes("k=1")));
 		assert.ok(!lines.some((line) => line.includes("\\sum")));
 		assert.ok(lines.some((line) => line.includes("2. Next item")));
 	});
@@ -215,5 +225,75 @@ describe("Markdown math rendering", () => {
 		const streamedLines = streamed.render(80);
 		const freshLines = new Markdown(part1 + part2, 0, 0, defaultMarkdownTheme).render(80);
 		assert.deepStrictEqual(streamedLines, freshLines);
+	});
+
+	it("stacks display fractions and operator limits", () => {
+		const lines = renderPlain(String.raw`\[
+\sum_{i=0}^n x_i = \frac{x^2+1}{x-1}
+\]`).map((line) => line.trimEnd());
+
+		assert.ok(lines.some((line) => line.includes(" n")));
+		assert.ok(lines.some((line) => line.includes("∑  xᵢ =")));
+		assert.ok(lines.some((line) => line.includes("i=0")));
+		assert.ok(lines.some((line) => line.includes("────")));
+		assert.ok(lines.some((line) => line.includes("x-1")));
+	});
+
+	it("composes display matrices and renders cases", () => {
+		const matrix = renderPlain(String.raw`\[
+A=\begin{pmatrix}1&200\\3000&4\end{pmatrix}.
+\]`).map((line) => line.trimEnd());
+		assert.ok(matrix.some((line) => line.includes("A = ⎛ 1    │ 200 ⎞")));
+		assert.ok(matrix.some((line) => line.includes("⎝ 3000 │ 4   ⎠.")));
+
+		const cases = renderPlain(String.raw`\[
+f(x)=\begin{cases}a & x<0 \\ b & x=0 \\ c & x>0\end{cases}
+\]`).map((line) => line.trimEnd());
+		assert.ok(cases.some((line) => line.includes("⎧ a if x < 0")));
+		assert.ok(cases.some((line) => line.includes("⎨ b if x = 0")));
+		assert.ok(cases.some((line) => line.includes("⎩ c if x > 0")));
+	});
+
+	it("preserves unsupported LaTeX with its delimiters", () => {
+		const inlineSource = String.raw`Unknown $x + \unknown{y}$ after`;
+		assert.ok(renderPlain(inlineSource).some((line) => line.includes(inlineSource)));
+
+		const block = renderPlain(String.raw`Before
+
+\[
+x + \unknown{y}
+\]
+
+after`).map((line) => line.trimEnd());
+		assert.ok(block.some((line) => line.includes("\\[")));
+		assert.ok(block.some((line) => line.includes(String.raw`x + \unknown{y}`)));
+		assert.ok(block.some((line) => line.includes("\\]")));
+	});
+
+	it("switches from a raw streamed delimiter to rendered math when it closes", () => {
+		const markdown = new Markdown(String.raw`Map \(\mathbb{C}^3`, 0, 0, defaultMarkdownTheme);
+		assert.ok(
+			markdown
+				.render(80)
+				.map(stripAnsi)
+				.some((line) => line.includes(String.raw`\(\mathbb{C}^3`)),
+		);
+
+		markdown.setText(String.raw`Map \(\mathbb{C}^3\)`);
+		const complete = markdown.render(80).map(stripAnsi);
+		assert.ok(complete.some((line) => line.includes("Map ℂ³")));
+		assert.ok(!complete.some((line) => line.includes("\\mathbb")));
+	});
+
+	it("allows the upgraded renderer to be disabled", () => {
+		const markdown = new Markdown(String.raw`Map $\mathbb{C}^3$`, 0, 0, defaultMarkdownTheme, undefined, {
+			renderLatex: false,
+		});
+		assert.ok(
+			markdown
+				.render(80)
+				.map(stripAnsi)
+				.some((line) => line.includes(String.raw`$\mathbb{C}^3$`)),
+		);
 	});
 });
