@@ -26,9 +26,9 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-function mockToken(): string {
+function mockToken(accountId = "acc_test"): string {
 	const payload = Buffer.from(
-		JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acc_test" } }),
+		JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: accountId } }),
 		"utf8",
 	).toString("base64");
 	return `aaa.${payload}.bbb`;
@@ -1008,5 +1008,375 @@ describe("openai-codex streaming", () => {
 			lastDeltaInputItems: 1,
 			lastPreviousResponseId: "resp_1",
 		});
+	});
+});
+
+describe("openai-codex usage limit handling", () => {
+	const model: Model<"openai-codex-responses"> = {
+		id: "gpt-5.1-codex",
+		name: "GPT-5.1 Codex",
+		api: "openai-codex-responses",
+		provider: "openai-codex",
+		baseUrl: "https://chatgpt.com/backend-api",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 400000,
+		maxTokens: 128000,
+	};
+
+	const context: Context = {
+		systemPrompt: "You are a helpful assistant.",
+		messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
+	};
+
+	function usageLimitBody(planType = "plus", resetsAtSeconds?: number): string {
+		return JSON.stringify({
+			error: {
+				type: "usage_limit_reached",
+				message: "The usage limit has been reached",
+				plan_type: planType,
+				...(resetsAtSeconds !== undefined ? { resets_at: resetsAtSeconds } : {}),
+			},
+		});
+	}
+
+	it("restarts with recovered account credentials on usage_limit_reached without consuming retry budget", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-codex-stream-"));
+		process.env.PI_CODING_AGENT_DIR = tempDir;
+
+		const firstToken = mockToken("acc_a");
+		const secondToken = mockToken("acc_b");
+		const requests: { authorization: string | null; accountId: string | null }[] = [];
+		const seenResponseAccountIds: (string | undefined)[] = [];
+
+		global.fetch = vi.fn(async (input: string | URL, init?: RequestInit) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url === "https://chatgpt.com/backend-api/codex/responses") {
+				const headers = init?.headers instanceof Headers ? init.headers : undefined;
+				requests.push({
+					authorization: headers?.get("Authorization") ?? null,
+					accountId: headers?.get("chatgpt-account-id") ?? null,
+				});
+				if (requests.length === 1) {
+					return new Response(usageLimitBody("plus", Math.floor(Date.now() / 1000) + 3900), {
+						status: 429,
+						headers: { "Content-Type": "application/json" },
+					});
+				}
+				const encoder = new TextEncoder();
+				return new Response(
+					new ReadableStream<Uint8Array>({
+						start(controller) {
+							controller.enqueue(encoder.encode(buildSSEPayload({ status: "completed" })));
+							controller.close();
+						},
+					}),
+					{ status: 200, headers: { "content-type": "text/event-stream" } },
+				);
+			}
+			return new Response("not found", { status: 404 });
+		}) as typeof fetch;
+
+		const failures: string[] = [];
+		const result = await streamOpenAICodexResponses(model, context, {
+			apiKey: firstToken,
+			transport: "sse",
+			onAuthFailure: async (failure) => {
+				failures.push(failure.code);
+				expect(failure.kind).toBe("usage_limit_reached");
+				expect(failure.status).toBe(429);
+				expect(failure.accountId).toBe("acc_a");
+				expect(failure.planType).toBe("plus");
+				expect(failure.resetsAt).toBeGreaterThan(Date.now());
+				expect(failure.attemptedAccountIds).toEqual(["acc_a"]);
+				return { action: "retry", apiKey: secondToken, accountId: "acc_b" };
+			},
+			onResponse: (response) => {
+				seenResponseAccountIds.push(response.authAccountId);
+			},
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(result.content.find((c) => c.type === "text")?.text).toBe("Hello");
+		expect(failures).toEqual(["usage_limit_reached"]);
+		// Exactly one request per account: transient retry budget untouched.
+		expect(requests).toEqual([
+			{ authorization: `Bearer ${firstToken}`, accountId: "acc_a" },
+			{ authorization: `Bearer ${secondToken}`, accountId: "acc_b" },
+		]);
+		expect(seenResponseAccountIds).toEqual(["acc_a", "acc_b"]);
+	});
+
+	it("fails with the recovery message when onAuthFailure returns fail", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-codex-stream-"));
+		process.env.PI_CODING_AGENT_DIR = tempDir;
+
+		global.fetch = vi.fn(async (input: string | URL) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url === "https://chatgpt.com/backend-api/codex/responses") {
+				return new Response(usageLimitBody(), { status: 429, headers: { "Content-Type": "application/json" } });
+			}
+			return new Response("not found", { status: 404 });
+		}) as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(model, context, {
+			apiKey: mockToken("acc_a"),
+			transport: "sse",
+			onAuthFailure: async () => ({
+				action: "fail",
+				message: "All 2 stored ChatGPT subscriptions are out of quota.",
+			}),
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("All 2 stored ChatGPT subscriptions are out of quota.");
+		expect(global.fetch).toHaveBeenCalledOnce();
+	});
+
+	it("does not retry usage_limit_reached transiently and classifies it as quota", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-codex-stream-"));
+		process.env.PI_CODING_AGENT_DIR = tempDir;
+
+		global.fetch = vi.fn(async (input: string | URL) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url === "https://chatgpt.com/backend-api/codex/responses") {
+				return new Response(usageLimitBody("pro"), {
+					status: 429,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			return new Response("not found", { status: 404 });
+		}) as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(model, context, {
+			apiKey: mockToken("acc_a"),
+			transport: "sse",
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toMatch(/usage limit/i);
+		expect(result.errorMessage).toContain("pro plan");
+		expect(global.fetch).toHaveBeenCalledOnce();
+		const failure = result.diagnostics?.find((d) => d.type === "provider_stream_failure");
+		expect(failure?.details).toMatchObject({ kind: "quota", status: 429, providerErrorType: "usage_limit_reached" });
+	});
+
+	it("keeps rate_limit_exceeded on the transient retry path", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-codex-stream-"));
+		process.env.PI_CODING_AGENT_DIR = tempDir;
+
+		let calls = 0;
+		global.fetch = vi.fn(async (input: string | URL) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url === "https://chatgpt.com/backend-api/codex/responses") {
+				calls++;
+				if (calls === 1) {
+					return new Response(
+						JSON.stringify({
+							error: { type: "rate_limit_exceeded", message: "Rate limit reached, please try again later" },
+						}),
+						{ status: 429, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				const encoder = new TextEncoder();
+				return new Response(
+					new ReadableStream<Uint8Array>({
+						start(controller) {
+							controller.enqueue(encoder.encode(buildSSEPayload({ status: "completed" })));
+							controller.close();
+						},
+					}),
+					{ status: 200, headers: { "content-type": "text/event-stream" } },
+				);
+			}
+			return new Response("not found", { status: 404 });
+		}) as typeof fetch;
+
+		const onAuthFailure = vi.fn();
+		const result = await streamOpenAICodexResponses(model, context, {
+			apiKey: mockToken("acc_a"),
+			transport: "sse",
+			onAuthFailure,
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(calls).toBe(2);
+		expect(onAuthFailure).not.toHaveBeenCalled();
+	}, 15000);
+
+	it("recovers from a websocket usage_limit error before any output was emitted", async () => {
+		const token = mockToken("acc_a");
+		const recoveredToken = mockToken("acc_b");
+		let connections = 0;
+
+		class MockWebSocket {
+			private listeners = new Map<string, Set<(event: unknown) => void>>();
+
+			constructor(_url: string, _protocols?: string | string[] | { headers?: Record<string, string> }) {
+				connections++;
+				queueMicrotask(() => this.dispatch("open", {}));
+			}
+
+			addEventListener(type: string, listener: (event: unknown) => void): void {
+				let listeners = this.listeners.get(type);
+				if (!listeners) {
+					listeners = new Set();
+					this.listeners.set(type, listeners);
+				}
+				listeners.add(listener);
+			}
+
+			removeEventListener(type: string, listener: (event: unknown) => void): void {
+				this.listeners.get(type)?.delete(listener);
+			}
+
+			send(data: string): void {
+				const body = JSON.parse(data);
+				if (connections === 1) {
+					queueMicrotask(() =>
+						this.dispatch("message", {
+							data: JSON.stringify({ type: "error", code: "usage_limit_reached", message: "limit reached" }),
+						}),
+					);
+					return;
+				}
+				expect(body.model).toBe("gpt-5.1-codex");
+				const events = [
+					{
+						type: "response.output_item.added",
+						item: { type: "message", id: "msg_1", role: "assistant", status: "in_progress", content: [] },
+					},
+					{ type: "response.content_part.added", part: { type: "output_text", text: "" } },
+					{ type: "response.output_text.delta", delta: "Hello" },
+					{
+						type: "response.output_item.done",
+						item: {
+							type: "message",
+							id: "msg_1",
+							role: "assistant",
+							status: "completed",
+							content: [{ type: "output_text", text: "Hello" }],
+						},
+					},
+					{
+						type: "response.completed",
+						response: {
+							status: "completed",
+							usage: {
+								input_tokens: 5,
+								output_tokens: 3,
+								total_tokens: 8,
+								input_tokens_details: { cached_tokens: 0 },
+							},
+						},
+					},
+				];
+				queueMicrotask(() => {
+					for (const event of events) {
+						this.dispatch("message", { data: JSON.stringify(event) });
+					}
+				});
+			}
+
+			close(): void {}
+
+			private dispatch(type: string, event: unknown): void {
+				for (const listener of this.listeners.get(type) ?? []) {
+					listener(event);
+				}
+			}
+		}
+
+		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		global.fetch = vi.fn(async () => new Response("unexpected fetch", { status: 500 })) as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(model, context, {
+			apiKey: token,
+			transport: "websocket",
+			onAuthFailure: async (failure) => {
+				expect(failure.accountId).toBe("acc_a");
+				return { action: "retry", apiKey: recoveredToken, accountId: "acc_b" };
+			},
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(connections).toBe(2);
+	});
+
+	it("does not restart when onAuthFailure offers an already-attempted account", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-codex-stream-"));
+		process.env.PI_CODING_AGENT_DIR = tempDir;
+
+		global.fetch = vi.fn(async (input: string | URL) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url === "https://chatgpt.com/backend-api/codex/responses") {
+				return new Response(usageLimitBody(), { status: 429, headers: { "Content-Type": "application/json" } });
+			}
+			return new Response("not found", { status: 404 });
+		}) as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(model, context, {
+			apiKey: mockToken("acc_a"),
+			transport: "sse",
+			onAuthFailure: async () => ({ action: "retry", apiKey: mockToken("acc_a"), accountId: "acc_a" }),
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toMatch(/usage limit/i);
+		expect(global.fetch).toHaveBeenCalledOnce();
+	});
+
+	it("never triggers account-switch recovery for a usage_limit error that arrives after stream content started", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-codex-stream-"));
+		process.env.PI_CODING_AGENT_DIR = tempDir;
+
+		// A 200 stream that emits partial output and THEN fails with
+		// usage_limit_reached: restarting with another account would duplicate
+		// the already-emitted content, so recovery must not engage.
+		const partialThenError = [
+			`data: ${JSON.stringify({
+				type: "response.output_item.added",
+				item: { type: "message", id: "msg_1", role: "assistant", status: "in_progress", content: [] },
+			})}`,
+			`data: ${JSON.stringify({ type: "response.content_part.added", part: { type: "output_text", text: "" } })}`,
+			`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "Hel" })}`,
+			`data: ${JSON.stringify({ type: "error", code: "usage_limit_reached", message: "limit reached mid-stream" })}`,
+		].join("\n\n");
+
+		global.fetch = vi.fn(async (input: string | URL) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url === "https://chatgpt.com/backend-api/codex/responses") {
+				const encoder = new TextEncoder();
+				return new Response(
+					new ReadableStream<Uint8Array>({
+						start(controller) {
+							controller.enqueue(encoder.encode(`${partialThenError}\n\n`));
+							controller.close();
+						},
+					}),
+					{ status: 200, headers: { "content-type": "text/event-stream" } },
+				);
+			}
+			return new Response("not found", { status: 404 });
+		}) as typeof fetch;
+
+		const onAuthFailure = vi.fn();
+		const result = await streamOpenAICodexResponses(model, context, {
+			apiKey: mockToken("acc_a"),
+			transport: "sse",
+			onAuthFailure,
+		}).result();
+
+		// No recovery attempt, no request restart, no duplicated content.
+		expect(onAuthFailure).not.toHaveBeenCalled();
+		expect(global.fetch).toHaveBeenCalledOnce();
+		expect(result.stopReason).toBe("error");
+		const textBlocks = result.content.filter((block) => block.type === "text");
+		expect(textBlocks).toHaveLength(1);
+		expect(textBlocks[0]?.text).toBe("Hel");
+		// Still classified as quota for diagnostics.
+		const failure = result.diagnostics?.find((d) => d.type === "provider_stream_failure");
+		expect(failure?.details).toMatchObject({ kind: "quota", providerErrorType: "usage_limit_reached" });
 	});
 });

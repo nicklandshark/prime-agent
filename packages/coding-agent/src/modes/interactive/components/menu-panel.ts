@@ -41,6 +41,8 @@ export interface MenuListLayout {
 
 const PANEL_PADDING_X = 2;
 const PANEL_PADDING_Y = 1;
+/** Exported so overlay children can mirror the panel's fixed chrome when hit-testing mouse input. */
+export const MENU_PANEL_PADDING_Y = PANEL_PADDING_Y;
 const FIELD_PADDING_X = 2;
 const ROW_PADDING_X = 2;
 const ROW_PADDING_Y = 1;
@@ -388,8 +390,19 @@ export class MenuRow implements Component, FullWidthMenuComponent {
 	}
 }
 
+interface MenuRowHitRegion {
+	/** Index of the row within this list's children. */
+	index: number;
+	/** First rendered line of the row (inclusive), relative to the list output. */
+	start: number;
+	/** First rendered line after the row (exclusive), relative to the list output. */
+	end: number;
+}
+
 export class MenuList extends Container implements FullWidthMenuComponent {
 	readonly fillsMenuPanel = true;
+	/** Hit regions captured during the latest render; used for mouse hit-testing. */
+	private rowHitRegions: MenuRowHitRegion[] = [];
 
 	constructor(private readonly options: MenuListOptions = {}) {
 		super();
@@ -397,12 +410,15 @@ export class MenuList extends Container implements FullWidthMenuComponent {
 
 	override render(width: number): string[] {
 		const lines: string[] = [];
+		const hitRegions: MenuRowHitRegion[] = [];
 		const compact = this.isCompact();
 		for (let index = 0; index < this.children.length; index++) {
 			const child = this.children[index];
+			const regionStart = lines.length;
 			if (child instanceof MenuRow) {
 				if (compact) {
 					lines.push(...child.renderContent(width));
+					hitRegions.push({ index, start: regionStart, end: lines.length });
 					continue;
 				}
 				const previousChild = this.children[index - 1];
@@ -414,6 +430,7 @@ export class MenuList extends Container implements FullWidthMenuComponent {
 				if (!nextRow) {
 					lines.push(...child.renderPadding(width, child.selected));
 				}
+				hitRegions.push({ index, start: regionStart, end: lines.length });
 				continue;
 			}
 			const childLines = fillsMenuPanel(child)
@@ -423,7 +440,26 @@ export class MenuList extends Container implements FullWidthMenuComponent {
 				lines.push(fillsMenuPanel(child) ? line : surfaceLine(line, width));
 			}
 		}
+		this.rowHitRegions = hitRegions;
 		return lines;
+	}
+
+	/**
+	 * Map a rendered line (relative to this list's output) back to the index of
+	 * the MenuRow occupying it, using the hit regions recorded during the latest
+	 * render. Row padding rows count as part of the row; lines rendered by
+	 * non-row children (or lines before the first render) return undefined.
+	 */
+	getRowIndexAt(renderRow: number): number | undefined {
+		if (!Number.isInteger(renderRow) || renderRow < 0) {
+			return undefined;
+		}
+		for (const region of this.rowHitRegions) {
+			if (renderRow >= region.start && renderRow < region.end) {
+				return region.index;
+			}
+		}
+		return undefined;
 	}
 
 	private isCompact(): boolean {

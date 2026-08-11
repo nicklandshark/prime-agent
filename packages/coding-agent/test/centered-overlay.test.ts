@@ -1,6 +1,11 @@
 import { type Component, type Focusable, type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
-import { CenteredOverlayComponent, showFullPaneOverlay } from "../src/modes/interactive/components/centered-overlay.js";
+import {
+	CenteredOverlayComponent,
+	type ScreenBounds,
+	type ScreenBoundsAware,
+	showFullPaneOverlay,
+} from "../src/modes/interactive/components/centered-overlay.js";
 
 class TestComponent implements Component, Focusable {
 	focused = false;
@@ -66,5 +71,33 @@ describe("CenteredOverlayComponent", () => {
 		showFullPaneOverlay(ui, new TestComponent(), { fullWidth: true });
 
 		expect(overlay?.render(120)[0]).toContain("content 120");
+	});
+
+	it("passes zero-based content bounds to screen-bounds-aware children", () => {
+		class BoundsComponent extends TestComponent implements ScreenBoundsAware {
+			bounds: ScreenBounds | undefined;
+			setScreenBounds(bounds: ScreenBounds): void {
+				this.bounds = bounds;
+			}
+		}
+		const inner = new BoundsComponent();
+		const component = new CenteredOverlayComponent(inner, {
+			getRows: () => 6,
+			maxContentWidth: 12,
+		});
+
+		component.render(20);
+
+		// 12-wide, 2-tall content centered in a 20x6 pane.
+		expect(inner.bounds).toEqual({ x: 4, y: 2, width: 12, height: 2 });
+	});
+
+	it("renders children without screen-bounds support unchanged", () => {
+		const component = new CenteredOverlayComponent(new TestComponent(), {
+			getRows: () => 6,
+			maxContentWidth: 12,
+		});
+
+		expect(() => component.render(20)).not.toThrow();
 	});
 });

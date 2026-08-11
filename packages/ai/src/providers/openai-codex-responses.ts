@@ -28,6 +28,7 @@ import type {
 	AssistantMessage,
 	Context,
 	Model,
+	ProviderAuthRecovery,
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
@@ -40,6 +41,7 @@ import {
 } from "../utils/diagnostics.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
+import { recordStreamFailure } from "../utils/stream-failure.js";
 import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.js";
 import { buildBaseOptions } from "./simple-options.js";
 
@@ -99,7 +101,55 @@ interface RequestBody {
 // Retry Helpers
 // ============================================================================
 
-function isRetryableError(status: number, errorText: string): boolean {
+/**
+ * Structural parse of a Codex error body. ChatGPT returns
+ * `{"error": {"type"|"code", "message", "plan_type", "resets_at"}}`;
+ * `resets_at` is epoch seconds and is normalized to milliseconds.
+ */
+interface CodexParsedErrorBody {
+	code?: string;
+	message?: string;
+	planType?: string;
+	resetsAt?: number;
+}
+
+function parseCodexErrorBody(errorText: string): CodexParsedErrorBody | undefined {
+	try {
+		const parsed = JSON.parse(errorText) as {
+			error?: { code?: unknown; type?: unknown; message?: unknown; plan_type?: unknown; resets_at?: unknown };
+		};
+		const err = parsed?.error;
+		if (!err || typeof err !== "object") return undefined;
+		const code =
+			typeof err.code === "string" && err.code.length > 0
+				? err.code
+				: typeof err.type === "string" && err.type.length > 0
+					? err.type
+					: undefined;
+		return {
+			code: code?.toLowerCase(),
+			message: typeof err.message === "string" ? err.message : undefined,
+			planType: typeof err.plan_type === "string" ? err.plan_type : undefined,
+			resetsAt:
+				typeof err.resets_at === "number" && Number.isFinite(err.resets_at) && err.resets_at > 0
+					? err.resets_at * 1000
+					: undefined,
+		};
+	} catch {
+		return undefined;
+	}
+}
+
+function isQuotaErrorCode(code: string | undefined): boolean {
+	return code === "usage_limit_reached" || code === "usage_not_included";
+}
+
+function isRetryableError(status: number, errorText: string, parsedError?: CodexParsedErrorBody): boolean {
+	// Subscription quota exhaustion is not transient: retrying the same
+	// account cannot succeed. Handled via options.onAuthFailure instead.
+	if (status === 429 && isQuotaErrorCode(parsedError?.code)) {
+		return false;
+	}
 	if (status === 429 || status === 500 || status === 502 || status === 503 || status === 504) {
 		return true;
 	}
@@ -118,6 +168,46 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 			reject(new Error("Request was aborted"));
 		});
 	});
+}
+
+/**
+ * Terminal HTTP error (non-retryable status or retries exhausted).
+ * Carries the structured error code so stream-failure classification keeps
+ * quota errors distinct from transient rate limits.
+ */
+class CodexHttpError extends Error {
+	readonly status: number;
+	readonly code?: string;
+	readonly planType?: string;
+	/** Epoch milliseconds, when the provider supplied `resets_at`. */
+	readonly resetsAt?: number;
+
+	constructor(
+		message: string,
+		options: { status: number; code?: string; planType?: string; resetsAt?: number; cause?: unknown },
+	) {
+		super(message);
+		this.name = "CodexHttpError";
+		this.status = options.status;
+		this.code = options.code;
+		this.planType = options.planType;
+		this.resetsAt = options.resetsAt;
+		this.cause = options?.cause;
+	}
+}
+
+/** 429 usage_limit_reached: eligible for account-switch recovery via onAuthFailure. */
+class CodexUsageLimitError extends CodexHttpError {
+	readonly accountId?: string;
+
+	constructor(
+		message: string,
+		options: { accountId?: string; planType?: string; resetsAt?: number; cause?: unknown } = {},
+	) {
+		super(message, { ...options, status: 429, code: "usage_limit_reached" });
+		this.name = "CodexUsageLimitError";
+		this.accountId = options.accountId;
+	}
 }
 
 // ============================================================================
@@ -151,52 +241,210 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 		};
 
 		try {
-			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
-			if (!apiKey) {
+			const initialApiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
+			if (!initialApiKey) {
 				throw new Error(`No API key for provider: ${model.provider}`);
 			}
 
-			const accountId = extractAccountId(apiKey);
+			let auth = { apiKey: initialApiKey, accountId: extractAccountId(initialApiKey) };
 			let body = buildRequestBody(model, context, options);
 			const nextBody = await options?.onPayload?.(body, model);
 			if (nextBody !== undefined) {
 				body = nextBody as RequestBody;
 			}
-			const websocketRequestId = options?.sessionId || createCodexRequestId();
-			const sseHeaders = buildSSEHeaders(model.headers, options?.headers, accountId, apiKey, options?.sessionId);
-			const websocketHeaders = buildWebSocketHeaders(
-				model.headers,
-				options?.headers,
-				accountId,
-				apiKey,
-				websocketRequestId,
-			);
 			const bodyJson = JSON.stringify(body);
-			const transport = options?.transport || "auto";
-			const websocketDisabledForSession = transport !== "sse" && isWebSocketSseFallbackActive(options?.sessionId);
-			if (websocketDisabledForSession) {
-				recordWebSocketSseFallback(options?.sessionId);
-			}
+			// Accounts that already returned usage_limit_reached within this call.
+			// Prevents recovery loops when the pool cannot offer a fresh account.
+			const attemptedAccountIds: string[] = [];
+			// A restart is only safe before any output/tool event has been emitted.
+			let outputStarted = false;
 
-			if (transport !== "sse" && !websocketDisabledForSession) {
-				let websocketStarted = false;
+			// Auth-recovery loop: a usage_limit_reached 429 restarts the whole
+			// request with fresh account credentials without consuming transient
+			// retry budget.
+			for (;;) {
 				try {
-					await processWebSocketStream(
-						resolveCodexWebSocketUrl(model.baseUrl),
-						body,
-						websocketHeaders,
-						output,
-						stream,
-						model,
-						() => {
-							websocketStarted = true;
-						},
-						options,
+					const websocketRequestId = options?.sessionId || createCodexRequestId();
+					const sseHeaders = buildSSEHeaders(
+						model.headers,
+						options?.headers,
+						auth.accountId,
+						auth.apiKey,
+						options?.sessionId,
 					);
+					const websocketHeaders = buildWebSocketHeaders(
+						model.headers,
+						options?.headers,
+						auth.accountId,
+						auth.apiKey,
+						websocketRequestId,
+					);
+					const transport = options?.transport || "auto";
+					const websocketDisabledForSession =
+						transport !== "sse" && isWebSocketSseFallbackActive(options?.sessionId);
+					if (websocketDisabledForSession) {
+						recordWebSocketSseFallback(options?.sessionId);
+					}
+
+					if (transport !== "sse" && !websocketDisabledForSession) {
+						let websocketStarted = false;
+						try {
+							await processWebSocketStream(
+								resolveCodexWebSocketUrl(model.baseUrl),
+								body,
+								websocketHeaders,
+								output,
+								stream,
+								model,
+								() => {
+									websocketStarted = true;
+									outputStarted = true;
+								},
+								options,
+							);
+
+							if (options?.signal?.aborted) {
+								throw new Error("Request was aborted");
+							}
+							stream.push({
+								type: "done",
+								reason: output.stopReason as "stop" | "length" | "toolUse",
+								message: output,
+							});
+							stream.end();
+							return;
+						} catch (error) {
+							const aborted = options?.signal?.aborted;
+							if (
+								!aborted &&
+								!websocketStarted &&
+								error instanceof CodexApiError &&
+								error.code === "usage_limit_reached"
+							) {
+								throw codexApiErrorToUsageLimit(error, auth.accountId);
+							}
+							if (aborted || isCodexNonTransportError(error)) {
+								throw error;
+							}
+							appendAssistantMessageDiagnostic(
+								output,
+								createAssistantMessageDiagnostic("provider_transport_failure", error, {
+									configuredTransport: transport,
+									fallbackTransport: websocketStarted ? undefined : "sse",
+									eventsEmitted: websocketStarted,
+									phase: websocketStarted ? "after_message_stream_start" : "before_message_stream_start",
+									requestBytes: new TextEncoder().encode(bodyJson).byteLength,
+								}),
+							);
+							recordWebSocketFailure(options?.sessionId, error);
+							if (websocketStarted) {
+								throw error;
+							}
+							recordWebSocketSseFallback(options?.sessionId);
+						}
+					}
+
+					// Fetch with retry logic for rate limits and transient errors
+					let response: Response | undefined;
+					let lastError: Error | undefined;
+
+					for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+						if (options?.signal?.aborted) {
+							throw new Error("Request was aborted");
+						}
+
+						try {
+							response = await fetch(resolveCodexUrl(model.baseUrl), {
+								method: "POST",
+								headers: sseHeaders,
+								body: bodyJson,
+								signal: options?.signal,
+							});
+							await options?.onResponse?.(
+								{
+									status: response.status,
+									headers: headersToRecord(response.headers),
+									authAccountId: auth.accountId,
+								},
+								model,
+							);
+
+							if (response.ok) {
+								break;
+							}
+
+							const errorText = await response.text();
+							const parsedError = parseCodexErrorBody(errorText);
+
+							// Structural quota failure: surface to onAuthFailure for
+							// account-switch recovery, never to the transient retry path.
+							if (response.status === 429 && parsedError?.code === "usage_limit_reached") {
+								const info = await parseErrorResponse(
+									new Response(errorText, { status: response.status, statusText: response.statusText }),
+								);
+								throw new CodexUsageLimitError(info.friendlyMessage || info.message, {
+									accountId: auth.accountId,
+									planType: parsedError.planType,
+									resetsAt: parsedError.resetsAt,
+								});
+							}
+
+							if (attempt < MAX_RETRIES && isRetryableError(response.status, errorText, parsedError)) {
+								const delayMs = BASE_DELAY_MS * 2 ** attempt;
+								await sleep(delayMs, options?.signal);
+								continue;
+							}
+
+							// Parse error for friendly message on final attempt or non-retryable error
+							const fakeResponse = new Response(errorText, {
+								status: response.status,
+								statusText: response.statusText,
+							});
+							const info = await parseErrorResponse(fakeResponse);
+							throw new CodexHttpError(info.friendlyMessage || info.message, {
+								status: response.status,
+								code: parsedError?.code,
+								planType: parsedError?.planType,
+								resetsAt: parsedError?.resetsAt,
+							});
+						} catch (error) {
+							// Terminal HTTP errors (including quota failures) are never
+							// retried as if they were network errors.
+							if (error instanceof CodexHttpError) {
+								throw error;
+							}
+							if (error instanceof Error) {
+								if (error.name === "AbortError" || error.message === "Request was aborted") {
+									throw new Error("Request was aborted");
+								}
+							}
+							lastError = error instanceof Error ? error : new Error(String(error));
+							// Network errors are retryable
+							if (attempt < MAX_RETRIES) {
+								const delayMs = BASE_DELAY_MS * 2 ** attempt;
+								await sleep(delayMs, options?.signal);
+								continue;
+							}
+							throw lastError;
+						}
+					}
+
+					if (!response?.ok) {
+						throw lastError ?? new Error("Failed after retries");
+					}
+
+					if (!response.body) {
+						throw new Error("No response body");
+					}
+
+					outputStarted = true;
+					stream.push({ type: "start", partial: output });
+					await processStream(response, output, stream, model, options);
 
 					if (options?.signal?.aborted) {
 						throw new Error("Request was aborted");
 					}
+
 					stream.push({
 						type: "done",
 						reason: output.stopReason as "stop" | "length" | "toolUse",
@@ -205,101 +453,45 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					stream.end();
 					return;
 				} catch (error) {
-					const aborted = options?.signal?.aborted;
-					if (aborted || isCodexNonTransportError(error)) {
-						throw error;
-					}
-					appendAssistantMessageDiagnostic(
-						output,
-						createAssistantMessageDiagnostic("provider_transport_failure", error, {
-							configuredTransport: transport,
-							fallbackTransport: websocketStarted ? undefined : "sse",
-							eventsEmitted: websocketStarted,
-							phase: websocketStarted ? "after_message_stream_start" : "before_message_stream_start",
-							requestBytes: new TextEncoder().encode(bodyJson).byteLength,
-						}),
-					);
-					recordWebSocketFailure(options?.sessionId, error);
-					if (websocketStarted) {
-						throw error;
-					}
-					recordWebSocketSseFallback(options?.sessionId);
-				}
-			}
-
-			// Fetch with retry logic for rate limits and transient errors
-			let response: Response | undefined;
-			let lastError: Error | undefined;
-
-			for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-				if (options?.signal?.aborted) {
-					throw new Error("Request was aborted");
-				}
-
-				try {
-					response = await fetch(resolveCodexUrl(model.baseUrl), {
-						method: "POST",
-						headers: sseHeaders,
-						body: bodyJson,
-						signal: options?.signal,
-					});
-					await options?.onResponse?.(
-						{ status: response.status, headers: headersToRecord(response.headers) },
-						model,
-					);
-
-					if (response.ok) {
-						break;
-					}
-
-					const errorText = await response.text();
-					if (attempt < MAX_RETRIES && isRetryableError(response.status, errorText)) {
-						const delayMs = BASE_DELAY_MS * 2 ** attempt;
-						await sleep(delayMs, options?.signal);
-						continue;
-					}
-
-					// Parse error for friendly message on final attempt or non-retryable error
-					const fakeResponse = new Response(errorText, {
-						status: response.status,
-						statusText: response.statusText,
-					});
-					const info = await parseErrorResponse(fakeResponse);
-					throw new Error(info.friendlyMessage || info.message);
-				} catch (error) {
-					if (error instanceof Error) {
-						if (error.name === "AbortError" || error.message === "Request was aborted") {
-							throw new Error("Request was aborted");
+					if (error instanceof CodexUsageLimitError && !outputStarted && options?.onAuthFailure) {
+						if (!attemptedAccountIds.includes(auth.accountId)) {
+							attemptedAccountIds.push(auth.accountId);
+						}
+						let recovery: ProviderAuthRecovery | undefined;
+						try {
+							recovery = await options.onAuthFailure({
+								kind: "usage_limit_reached",
+								status: 429,
+								code: "usage_limit_reached",
+								accountId: auth.accountId,
+								planType: error.planType,
+								resetsAt: error.resetsAt,
+								attemptedAccountIds,
+							});
+						} catch {
+							// A broken recovery hook must not mask the original quota error.
+							recovery = undefined;
+						}
+						if (
+							recovery?.action === "retry" &&
+							recovery.apiKey &&
+							recovery.accountId &&
+							!attemptedAccountIds.includes(recovery.accountId)
+						) {
+							auth = { apiKey: recovery.apiKey, accountId: recovery.accountId };
+							continue;
+						}
+						if (recovery?.action === "fail" && recovery.message) {
+							throw new CodexUsageLimitError(recovery.message, {
+								accountId: auth.accountId,
+								planType: error.planType,
+								resetsAt: error.resetsAt,
+							});
 						}
 					}
-					lastError = error instanceof Error ? error : new Error(String(error));
-					// Network errors are retryable
-					if (attempt < MAX_RETRIES && !lastError.message.includes("usage limit")) {
-						const delayMs = BASE_DELAY_MS * 2 ** attempt;
-						await sleep(delayMs, options?.signal);
-						continue;
-					}
-					throw lastError;
+					throw error;
 				}
 			}
-
-			if (!response?.ok) {
-				throw lastError ?? new Error("Failed after retries");
-			}
-
-			if (!response.body) {
-				throw new Error("No response body");
-			}
-
-			stream.push({ type: "start", partial: output });
-			await processStream(response, output, stream, model, options);
-
-			if (options?.signal?.aborted) {
-				throw new Error("Request was aborted");
-			}
-
-			stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
-			stream.end();
 		} catch (error) {
 			for (const block of output.content) {
 				// partialJson is only a streaming scratch buffer; never persist it.
@@ -307,6 +499,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = error instanceof Error ? error.message : String(error);
+			recordStreamFailure(model, output, error);
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
 		}
@@ -331,6 +524,8 @@ export const streamSimpleOpenAICodexResponses: StreamFunction<"openai-codex-resp
 
 	return streamOpenAICodexResponses(model, context, {
 		...base,
+		// buildBaseOptions forwards a fixed field set; onAuthFailure is explicit.
+		onAuthFailure: options?.onAuthFailure,
 		reasoningEffort,
 	} satisfies OpenAICodexResponsesOptions);
 };
@@ -1233,8 +1428,10 @@ async function parseErrorResponse(response: Response): Promise<{ message: string
 		};
 		const err = parsed?.error;
 		if (err) {
-			const code = err.code || err.type || "";
-			if (/usage_limit_reached|usage_not_included|rate_limit_exceeded/i.test(code) || response.status === 429) {
+			const code = (err.code || err.type || "").toLowerCase();
+			// Only subscription quota errors get the "usage limit" message;
+			// rate_limit_exceeded is transient and retries with backoff.
+			if (isQuotaErrorCode(code)) {
 				const plan = err.plan_type ? ` (${err.plan_type.toLowerCase()} plan)` : "";
 				const mins = err.resets_at
 					? Math.max(0, Math.round((err.resets_at * 1000 - Date.now()) / 60000))
@@ -1249,6 +1446,23 @@ async function parseErrorResponse(response: Response): Promise<{ message: string
 	}
 
 	return { message, friendlyMessage };
+}
+
+/** Convert a websocket-side usage_limit CodexApiError into a recoverable CodexUsageLimitError. */
+function codexApiErrorToUsageLimit(error: CodexApiError, accountId: string): CodexUsageLimitError {
+	const payload = error.payload as
+		| {
+				error?: { plan_type?: unknown; resets_at?: unknown };
+				response?: { error?: { plan_type?: unknown; resets_at?: unknown } };
+		  }
+		| undefined;
+	const errorBody = payload?.error ?? payload?.response?.error;
+	const planType = typeof errorBody?.plan_type === "string" ? errorBody.plan_type : undefined;
+	const resetsAt =
+		typeof errorBody?.resets_at === "number" && Number.isFinite(errorBody.resets_at) && errorBody.resets_at > 0
+			? errorBody.resets_at * 1000
+			: undefined;
+	return new CodexUsageLimitError(error.message, { accountId, planType, resetsAt, cause: error });
 }
 
 // ============================================================================

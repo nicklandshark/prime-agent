@@ -29,7 +29,7 @@ const REDIRECT_URI = "http://localhost:1455/auth/callback";
 const SCOPE = "openid profile email offline_access";
 const JWT_CLAIM_PATH = "https://api.openai.com/auth";
 
-type TokenSuccess = { type: "success"; access: string; refresh: string; expires: number };
+type TokenSuccess = { type: "success"; access: string; refresh: string; expires: number; idToken?: string };
 type TokenFailure = { type: "failed"; message: string; status?: number };
 type TokenResult = TokenSuccess | TokenFailure;
 
@@ -37,8 +37,15 @@ type JwtPayload = {
 	[JWT_CLAIM_PATH]?: {
 		chatgpt_account_id?: string;
 	};
+	email?: unknown;
 	[key: string]: unknown;
 };
+
+/** Identity material carried by ChatGPT OAuth tokens. */
+export interface OpenAICodexIdentity {
+	accountId?: string;
+	email?: string;
+}
 
 function createState(): string {
 	if (!_randomBytes) {
@@ -82,8 +89,14 @@ function decodeJwt(token: string): JwtPayload | null {
 		const parts = token.split(".");
 		if (parts.length !== 3) return null;
 		const payload = parts[1] ?? "";
-		const decoded = atob(payload);
-		return JSON.parse(decoded) as JwtPayload;
+		// JWT segments are base64url (RFC 7515): atob expects standard base64,
+		// so map the URL-safe alphabet back and restore stripped padding.
+		const base64 = payload.replace(/-/g, "+").replace(/_/g, "/");
+		const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
+		const decoded = atob(padded);
+		// atob returns a binary string; JWT payloads are UTF-8 JSON.
+		const bytes = Uint8Array.from(decoded, (char) => char.charCodeAt(0));
+		return JSON.parse(new TextDecoder().decode(bytes)) as JwtPayload;
 	} catch {
 		return null;
 	}
@@ -119,6 +132,7 @@ async function exchangeAuthorizationCode(
 		access_token?: string;
 		refresh_token?: string;
 		expires_in?: number;
+		id_token?: string;
 	};
 
 	if (!json.access_token || !json.refresh_token || typeof json.expires_in !== "number") {
@@ -133,6 +147,7 @@ async function exchangeAuthorizationCode(
 		access: json.access_token,
 		refresh: json.refresh_token,
 		expires: Date.now() + json.expires_in * 1000,
+		idToken: typeof json.id_token === "string" ? json.id_token : undefined,
 	};
 }
 
@@ -161,6 +176,7 @@ async function refreshAccessToken(refreshToken: string): Promise<TokenResult> {
 			access_token?: string;
 			refresh_token?: string;
 			expires_in?: number;
+			id_token?: string;
 		};
 
 		if (!json.access_token || !json.refresh_token || typeof json.expires_in !== "number") {
@@ -175,6 +191,7 @@ async function refreshAccessToken(refreshToken: string): Promise<TokenResult> {
 			access: json.access_token,
 			refresh: json.refresh_token,
 			expires: Date.now() + json.expires_in * 1000,
+			idToken: typeof json.id_token === "string" ? json.id_token : undefined,
 		};
 	} catch (error) {
 		return {
@@ -287,11 +304,31 @@ function startLocalOAuthServer(state: string): Promise<OAuthServerInfo> {
 	});
 }
 
-function getAccountId(accessToken: string): string | null {
-	const payload = decodeJwt(accessToken);
-	const auth = payload?.[JWT_CLAIM_PATH];
+const PROFILE_CLAIM_PATH = "https://api.openai.com/profile";
+
+function readEmailClaim(payload: JwtPayload | null): string | undefined {
+	const direct = payload?.email;
+	if (typeof direct === "string" && direct.length > 0) return direct;
+	const profile = payload?.[PROFILE_CLAIM_PATH] as { email?: unknown } | undefined;
+	const nested = profile?.email;
+	return typeof nested === "string" && nested.length > 0 ? nested : undefined;
+}
+
+/**
+ * Extract the ChatGPT account id and email from OAuth tokens.
+ * The account id lives under the "https://api.openai.com/auth" claim of the
+ * access token; the email claim is present on the id token (and, for some
+ * flows, on the access token), so both are consulted.
+ */
+export function extractOpenAICodexIdentity(accessToken: string, idToken?: string): OpenAICodexIdentity {
+	const accessPayload = decodeJwt(accessToken);
+	const auth = accessPayload?.[JWT_CLAIM_PATH];
 	const accountId = auth?.chatgpt_account_id;
-	return typeof accountId === "string" && accountId.length > 0 ? accountId : null;
+	const idPayload = idToken ? decodeJwt(idToken) : null;
+	return {
+		accountId: typeof accountId === "string" && accountId.length > 0 ? accountId : undefined,
+		email: readEmailClaim(idPayload) ?? readEmailClaim(accessPayload),
+	};
 }
 
 /**
@@ -396,8 +433,8 @@ export async function loginOpenAICodex(options: {
 			throw new Error(tokenResult.message);
 		}
 
-		const accountId = getAccountId(tokenResult.access);
-		if (!accountId) {
+		const identity = extractOpenAICodexIdentity(tokenResult.access, tokenResult.idToken);
+		if (!identity.accountId) {
 			throw new Error("Failed to extract accountId from token");
 		}
 
@@ -405,7 +442,8 @@ export async function loginOpenAICodex(options: {
 			access: tokenResult.access,
 			refresh: tokenResult.refresh,
 			expires: tokenResult.expires,
-			accountId,
+			accountId: identity.accountId,
+			...(identity.email ? { email: identity.email } : {}),
 		};
 	} finally {
 		server.close();
@@ -413,24 +451,42 @@ export async function loginOpenAICodex(options: {
 }
 
 /**
- * Refresh OpenAI Codex OAuth token
+ * Refresh OpenAI Codex OAuth token.
+ *
+ * `previousCredentials` lets the caller preserve identity metadata (email,
+ * accountId) that refresh responses do not always carry back.
  */
-export async function refreshOpenAICodexToken(refreshToken: string): Promise<OAuthCredentials> {
+export async function refreshOpenAICodexToken(
+	refreshToken: string,
+	previousCredentials?: OAuthCredentials,
+): Promise<OAuthCredentials> {
 	const result = await refreshAccessToken(refreshToken);
 	if (result.type !== "success") {
 		throw new Error(result.message);
 	}
 
-	const accountId = getAccountId(result.access);
+	const identity = extractOpenAICodexIdentity(result.access, result.idToken);
+	const previousAccountId =
+		typeof previousCredentials?.accountId === "string" && previousCredentials.accountId.length > 0
+			? previousCredentials.accountId
+			: undefined;
+	const previousEmail =
+		typeof previousCredentials?.email === "string" && previousCredentials.email.length > 0
+			? previousCredentials.email
+			: undefined;
+
+	const accountId = identity.accountId ?? previousAccountId;
 	if (!accountId) {
 		throw new Error("Failed to extract accountId from token");
 	}
+	const email = identity.email ?? previousEmail;
 
 	return {
 		access: result.access,
 		refresh: result.refresh,
 		expires: result.expires,
 		accountId,
+		...(email ? { email } : {}),
 	};
 }
 
@@ -449,7 +505,7 @@ export const openaiCodexOAuthProvider: OAuthProviderInterface = {
 	},
 
 	async refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
-		return refreshOpenAICodexToken(credentials.refresh);
+		return refreshOpenAICodexToken(credentials.refresh, credentials);
 	},
 
 	getApiKey(credentials: OAuthCredentials): string {

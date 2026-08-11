@@ -75,7 +75,40 @@ export type ServiceTier = "auto" | "default" | "flex" | "scale" | "priority" | n
 export interface ProviderResponse {
 	status: number;
 	headers: Record<string, string>;
+	/**
+	 * Account the request was authenticated with, when the provider supports
+	 * multiple stored accounts (e.g. openai-codex ChatGPT subscriptions).
+	 * Lets onResponse consumers attribute usage headers to the right account.
+	 */
+	authAccountId?: string;
 }
+
+/**
+ * Structured auth/quota failure handed to StreamOptions.onAuthFailure.
+ * Currently emitted for openai-codex 429 usage_limit_reached responses.
+ * `resetsAt` is milliseconds since epoch when known.
+ */
+export interface ProviderAuthFailure {
+	kind: "usage_limit_reached";
+	status: 429;
+	code: "usage_limit_reached";
+	accountId?: string;
+	planType?: string;
+	resetsAt?: number;
+	attemptedAccountIds: readonly string[];
+}
+
+export type ProviderAuthRecovery =
+	| { action: "retry"; apiKey: string; accountId: string }
+	| { action: "fail"; message: string };
+
+/**
+ * Provider hook invoked on a structured auth failure before the request is
+ * failed. Return { action: "retry" } to restart the request with fresh
+ * credentials, { action: "fail" } to abort with a custom message, or
+ * undefined to surface the provider's own error.
+ */
+export type ProviderAuthFailureHandler = (f: ProviderAuthFailure) => Promise<ProviderAuthRecovery | undefined>;
 
 export interface StreamOptions {
 	temperature?: number;
@@ -109,6 +142,12 @@ export interface StreamOptions {
 	 * its body stream is consumed.
 	 */
 	onResponse?: (response: ProviderResponse, model: Model<Api>) => void | Promise<void>;
+	/**
+	 * Optional recovery hook for structured auth failures (e.g. openai-codex
+	 * usage_limit_reached). Invoked before the request fails; may restart the
+	 * request with credentials for a different account.
+	 */
+	onAuthFailure?: ProviderAuthFailureHandler;
 	/**
 	 * Optional custom HTTP headers to include in API requests.
 	 * Merged with provider defaults; can override default headers.

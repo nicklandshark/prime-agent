@@ -37,6 +37,13 @@ import {
 	compareAuthSelectorProviders,
 	OAuthSelectorComponent,
 } from "./components/oauth-selector.js";
+import {
+	getOpenAICodexAccountDisplayLabel,
+	getOpenAICodexAccountManager,
+	type OpenAICodexAccountManager,
+	OpenAICodexAccountSelectorComponent,
+	type OpenAICodexAccountView,
+} from "./components/openai-codex-account-selector.js";
 import { PrimeTeamSelectorComponent } from "./components/prime-team-selector.js";
 import { theme } from "./theme/theme.js";
 
@@ -53,6 +60,8 @@ export type AuthenticationResult =
 	| { status: "failed" };
 
 export const BEDROCK_PROVIDER_ID = "amazon-bedrock";
+
+export const OPENAI_CODEX_PROVIDER_ID = "openai-codex";
 
 export const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING =
 	"Anthropic subscription auth is active. Third-party harness usage draws from extra usage and is billed per token, not your Claude plan limits. Manage extra usage at https://claude.ai/settings/usage.";
@@ -828,13 +837,6 @@ export class ProviderAuthFlows {
 		providerName: string,
 		kind: "provider" | "service" = "provider",
 	): Promise<AuthenticationResult> {
-		const providerInfo = this.host.modelRegistry.authStorage
-			.getOAuthProviders()
-			.find((provider) => provider.id === providerId);
-
-		// Providers that use callback servers (can paste redirect URL)
-		const usesCallbackServer = providerInfo?.usesCallbackServer ?? false;
-
 		// Create login dialog component
 		const dialog = new LoginDialogComponent(
 			this.host.ui,
@@ -849,6 +851,124 @@ export class ProviderAuthFlows {
 			maxContentWidth: 88,
 			suspendFullscreenMouse: true,
 		});
+
+		if (providerId === OPENAI_CODEX_PROVIDER_ID) {
+			const manager = getOpenAICodexAccountManager(this.host.modelRegistry);
+			const cachedAccounts = manager?.getCachedAccounts() ?? [];
+			// Without a manager or any known account the selector would only
+			// offer "Add new account", so skip straight to OAuth.
+			if (manager && cachedAccounts.length > 0) {
+				const chosen = await this.showOpenAICodexAccountSelector(manager, cachedAccounts, dialogHandle);
+				if (chosen === undefined) {
+					dialogHandle.hide();
+					this.host.ui.requestRender();
+					return { status: "cancelled" };
+				}
+				if (chosen !== "add") {
+					dialogHandle.hide();
+					this.host.ui.requestRender();
+					try {
+						const account = manager.selectAccount(chosen.accountId, "manual");
+						return await this.completeProviderAuthentication(
+							providerId,
+							providerName,
+							"oauth",
+							`Using ${getOpenAICodexAccountDisplayLabel(account)}`,
+							kind,
+						);
+					} catch (error: unknown) {
+						const errorMsg = error instanceof Error ? error.message : String(error);
+						this.host.showError(`Failed to switch ${providerName} account: ${errorMsg}`);
+						return { status: "failed" };
+					}
+				}
+				// "add": the selector restored the login dialog; fall through to OAuth.
+			}
+		}
+
+		return this.runOAuthLoginDialog(providerId, providerName, kind, dialog, dialogHandle);
+	}
+
+	/**
+	 * Stack the account selector over the (hidden) login dialog for openai-codex.
+	 * Cached rows render immediately; usage probes refresh them in the background
+	 * and are aborted when the selector closes. Resolves with the chosen account,
+	 * "add" when the user wants a new account (the login dialog is restored), or
+	 * undefined on cancel.
+	 */
+	private showOpenAICodexAccountSelector(
+		manager: OpenAICodexAccountManager,
+		cachedAccounts: OpenAICodexAccountView[],
+		dialogHandle: OverlayHandle,
+	): Promise<OpenAICodexAccountView | "add" | undefined> {
+		return new Promise((resolve) => {
+			dialogHandle.setHidden(true);
+			const probeAbort = new AbortController();
+			let selectorHandle: OverlayHandle | undefined;
+			const close = () => {
+				probeAbort.abort();
+				selector.dispose();
+				selectorHandle?.hide();
+				this.host.ui.requestRender();
+			};
+			const selector = new OpenAICodexAccountSelectorComponent(
+				this.host.ui,
+				cachedAccounts,
+				{
+					onSelect: (account) => {
+						close();
+						resolve(account);
+					},
+					onAddAccount: () => {
+						close();
+						dialogHandle.setHidden(false);
+						dialogHandle.focus();
+						this.host.ui.requestRender();
+						resolve("add");
+					},
+					onCancel: () => {
+						close();
+						resolve(undefined);
+					},
+				},
+				{ getRows: () => this.host.ui.terminal.rows },
+				true,
+			);
+			// The selector hit-tests mouse input itself, so unlike the login dialog
+			// it must not suspend fullscreen mouse tracking.
+			selectorHandle = showFullPaneOverlay(this.host.ui, selector, { maxContentWidth: 88 });
+
+			manager
+				.listAccounts({ refreshUsage: true, signal: probeAbort.signal })
+				.then((accounts) => {
+					if (!probeAbort.signal.aborted) {
+						selector.updateAccounts(accounts, false);
+					}
+				})
+				.catch(() => {
+					if (probeAbort.signal.aborted) return;
+					try {
+						selector.updateAccounts(manager.getCachedAccounts(), false);
+					} catch {
+						// Keep the cached rows if even the cache read fails.
+					}
+				});
+		});
+	}
+
+	private async runOAuthLoginDialog(
+		providerId: string,
+		providerName: string,
+		kind: "provider" | "service",
+		dialog: LoginDialogComponent,
+		dialogHandle: OverlayHandle,
+	): Promise<AuthenticationResult> {
+		const providerInfo = this.host.modelRegistry.authStorage
+			.getOAuthProviders()
+			.find((provider) => provider.id === providerId);
+
+		// Providers that use callback servers (can paste redirect URL)
+		const usesCallbackServer = providerInfo?.usesCallbackServer ?? false;
 
 		// Promise for manual code input (racing with callback server)
 		let manualCodeResolve: ((code: string) => void) | undefined;

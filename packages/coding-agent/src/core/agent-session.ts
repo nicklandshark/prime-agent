@@ -359,6 +359,13 @@ export type AgentSessionEvent =
 			provider: string;
 			sourceTokens?: readonly AuthSourceToken[];
 	  }
+	| {
+			type: "oauth_account_changed";
+			provider: "openai-codex";
+			accountId: string;
+			label: string;
+			reason: "manual" | "usage_limit";
+	  }
 	| { type: "rlm_child_update"; child: RlmChildAgentSnapshot }
 	| { type: "recap_update"; recap: string | undefined }
 	| { type: "goal_update"; goal: GoalState }
@@ -1092,6 +1099,7 @@ export class AgentSession {
 
 	// Event subscription state
 	private _unsubscribeAgent?: () => void;
+	private _unsubscribeOpenAICodexAccounts?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
 	private _lastSessionActionSnapshot: SessionActionSnapshot = {
 		queuedCount: 0,
@@ -1353,6 +1361,8 @@ export class AgentSession {
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
+		// Forward ChatGPT subscription switches (manual or usage-limit driven).
+		this._subscribeToOpenAICodexAccounts();
 		this._installAgentToolHooks();
 		this._installAgentTurnHook();
 		this._installAgentContinuationHook();
@@ -3750,6 +3760,10 @@ export class AgentSession {
 			this._unsubscribeAgent();
 			this._unsubscribeAgent = undefined;
 		}
+		if (this._unsubscribeOpenAICodexAccounts) {
+			this._unsubscribeOpenAICodexAccounts();
+			this._unsubscribeOpenAICodexAccounts = undefined;
+		}
 	}
 
 	/**
@@ -3757,8 +3771,18 @@ export class AgentSession {
 	 * Preserves all existing listeners.
 	 */
 	private _reconnectToAgent(): void {
-		if (this._unsubscribeAgent) return; // Already connected
-		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
+		if (!this._unsubscribeAgent) {
+			this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
+		}
+		if (!this._unsubscribeOpenAICodexAccounts) {
+			this._subscribeToOpenAICodexAccounts();
+		}
+	}
+
+	private _subscribeToOpenAICodexAccounts(): void {
+		this._unsubscribeOpenAICodexAccounts = this._modelRegistry.openAICodexAccounts.onAccountChanged((event) => {
+			this._emit({ type: "oauth_account_changed", ...event });
+		});
 	}
 
 	/**
@@ -9999,6 +10023,11 @@ export class AgentSession {
 		// Context overflow is handled by compaction, not retry
 		const contextWindow = this.model?.contextWindow ?? 0;
 		if (isContextOverflow(message, contextWindow)) return false;
+
+		// Subscription quota exhaustion is terminal: the provider already had
+		// its chance to switch accounts via onAuthFailure, so retrying the same
+		// request would just fail again.
+		if (this._getProviderStreamFailureKind(message) === "quota") return false;
 
 		if (this._isFauxProviderQueueExhausted(message)) {
 			return false;

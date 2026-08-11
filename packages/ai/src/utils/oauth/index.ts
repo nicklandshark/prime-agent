@@ -18,7 +18,13 @@ export {
 	refreshGitHubCopilotToken,
 } from "./github-copilot.js";
 // OpenAI Codex (ChatGPT OAuth)
-export { loginOpenAICodex, openaiCodexOAuthProvider, refreshOpenAICodexToken } from "./openai-codex.js";
+export {
+	extractOpenAICodexIdentity,
+	loginOpenAICodex,
+	type OpenAICodexIdentity,
+	openaiCodexOAuthProvider,
+	refreshOpenAICodexToken,
+} from "./openai-codex.js";
 
 export * from "./types.js";
 

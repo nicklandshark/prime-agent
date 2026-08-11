@@ -1,11 +1,19 @@
 import { join } from "node:path";
 import { Agent, type AgentMessage, type ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { clampThinkingLevel, type Message, type Model, streamSimple, supportsFastMode } from "@earendil-works/pi-ai";
+import {
+	clampThinkingLevel,
+	type Message,
+	type Model,
+	type ProviderAuthRecovery,
+	type ProviderResponse,
+	streamSimple,
+	supportsFastMode,
+} from "@earendil-works/pi-ai";
 import { getAgentDir } from "../config.js";
 import { AgentSession } from "./agent-session.js";
 import type { AgentSessionCreationOptions } from "./agent-session-services.js";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.js";
-import { AuthStorage } from "./auth-storage.js";
+import { AuthStorage, OPENAI_CODEX_PROVIDER_ID } from "./auth-storage.js";
 import type { AgentAutonomousConfig } from "./autonomous.js";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.js";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.js";
@@ -309,6 +317,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				throw new Error(auth.error);
 			}
 			const providerRetrySettings = settingsManager.getProviderRetrySettings();
+			const isOpenAICodex = model.provider === OPENAI_CODEX_PROVIDER_ID;
+			const preExistingAuthFailure = options?.onAuthFailure;
+			const preExistingOnResponse = options?.onResponse;
 			return streamSimple(model, context, {
 				...options,
 				apiKey: auth.apiKey,
@@ -316,6 +327,28 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
 				maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
 				headers: auth.headers || options?.headers ? { ...auth.headers, ...options?.headers } : undefined,
+				...(isOpenAICodex
+					? {
+							// Chain any pre-existing hook; the account pool manager is the
+							// default recovery for usage_limit_reached.
+							onAuthFailure: async (failure): Promise<ProviderAuthRecovery | undefined> => {
+								if (preExistingAuthFailure) {
+									const recovery = await preExistingAuthFailure(failure);
+									if (recovery) return recovery;
+								}
+								return modelRegistry.openAICodexAccounts.recoverFromUsageLimit(failure);
+							},
+							onResponse: async (response: ProviderResponse, responseModel): Promise<void> => {
+								// Feed passive usage headers to the account manager,
+								// attributed to the account that authenticated the request.
+								const accountId = response.authAccountId ?? auth.accountId;
+								if (accountId) {
+									modelRegistry.openAICodexAccounts.observeResponse(accountId, response.headers);
+								}
+								await preExistingOnResponse?.(response, responseModel);
+							},
+						}
+					: {}),
 			});
 		},
 		onPayload: async (payload, _model) => {

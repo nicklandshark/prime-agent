@@ -191,3 +191,68 @@ describe("MenuPanel", () => {
 		}
 	});
 });
+
+describe("MenuList.getRowIndexAt", () => {
+	beforeAll(() => {
+		initTheme("dark");
+	});
+
+	it("maps rendered lines to rows, including row padding", () => {
+		const list = new MenuList();
+		list.addChild(new MenuRow({ primary: "first", secondary: "one", selected: false }));
+		list.addChild(new MenuRow({ primary: "second", secondary: "two", selected: false }));
+
+		const lines = list.render(40);
+
+		// Row 0: top padding + primary + secondary (lines 0-2); row 1 adds the
+		// trailing padding as the last row (lines 3-6).
+		expect(lines).toHaveLength(7);
+		expect(list.getRowIndexAt(0)).toBe(0);
+		expect(list.getRowIndexAt(1)).toBe(0);
+		expect(list.getRowIndexAt(2)).toBe(0);
+		expect(list.getRowIndexAt(3)).toBe(1);
+		expect(list.getRowIndexAt(6)).toBe(1);
+		expect(list.getRowIndexAt(7)).toBeUndefined();
+		expect(list.getRowIndexAt(-1)).toBeUndefined();
+	});
+
+	it("uses compact row heights in compact mode", () => {
+		const list = new MenuList({ compact: true });
+		list.addChild(new MenuRow({ primary: "first", secondary: "one", selected: false }));
+		list.addChild(new MenuRow({ primary: "second", secondary: "two", selected: false }));
+
+		const lines = list.render(40);
+
+		expect(lines).toHaveLength(4);
+		expect(list.getRowIndexAt(0)).toBe(0);
+		expect(list.getRowIndexAt(1)).toBe(0);
+		expect(list.getRowIndexAt(2)).toBe(1);
+		expect(list.getRowIndexAt(3)).toBe(1);
+		expect(list.getRowIndexAt(4)).toBeUndefined();
+	});
+
+	it("skips lines rendered by non-row children", () => {
+		const list = new MenuList();
+		list.addChild(new MenuRow({ primary: "first", selected: false }));
+		list.addChild(new TruncatedText("hint", 1, 0));
+		list.addChild(new MenuRow({ primary: "second", selected: false }));
+
+		const lines = list.render(40);
+
+		// Row 0 gets a bottom pad because the next child is not a MenuRow; the
+		// hint line belongs to no row; the trailing row is a MenuRow again.
+		expect(lines).toHaveLength(7);
+		expect(list.getRowIndexAt(0)).toBe(0);
+		expect(list.getRowIndexAt(2)).toBe(0);
+		expect(list.getRowIndexAt(3)).toBeUndefined();
+		expect(list.getRowIndexAt(4)).toBe(2);
+		expect(list.getRowIndexAt(6)).toBe(2);
+	});
+
+	it("returns undefined before the first render", () => {
+		const list = new MenuList();
+		list.addChild(new MenuRow({ primary: "first", selected: false }));
+
+		expect(list.getRowIndexAt(0)).toBeUndefined();
+	});
+});
