@@ -86,6 +86,9 @@ export interface CursorCloudEnvironmentsOptions extends MenuViewportProvider {
  */
 export function formatCursorCloudSelectionStatus(selection: CursorCloudViewerSelection): string {
 	if (selection.kind === "named") {
+		if (selection.environment.archived) {
+			return `${selection.environment.name} — archived (no active agents); create a fresh named environment to spawn into it`;
+		}
 		return `${selection.environment.name} — call a cloud agent into it with rlm(model=..., environment="${selection.environment.name}")`;
 	}
 	const sshTarget = selection.environment.sshTarget;
@@ -495,6 +498,9 @@ export class CursorCloudEnvironmentsComponent extends Container implements Focus
 }
 
 function formatNamedEnvironmentMeta(environment: CursorCloudNamedEnvironmentView): string {
+	if (environment.archived) {
+		return "archived";
+	}
 	const count = `${environment.agentCount} agent${environment.agentCount === 1 ? "" : "s"}`;
 	return environment.lastActivityAt
 		? `${count} · ${formatCursorCloudRelativeTime(environment.lastActivityAt)}`

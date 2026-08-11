@@ -127,7 +127,11 @@ export const streamCursor: StreamFunction<"cursor-cloud-agents", CursorOptions> 
 							"provider options, or target a named cloud environment via the environment option.",
 					);
 				}
-				const created = await client.createAgent(userMessage, repos, resolveTunnelEnabled(options), environment);
+				// A named cloud environment is already provisioned, so the tunnel preamble is
+				// unnecessary there — default tunnel off when environment is set unless the
+				// caller explicitly opts back in.
+				const tunnelEnabled = options?.tunnel ?? (environment ? false : resolveTunnelEnabled(options));
+				const created = await client.createAgent(userMessage, repos, tunnelEnabled, environment);
 				agentId = created.agentId;
 				runId = created.runId;
 			}

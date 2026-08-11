@@ -84,6 +84,8 @@ export interface CursorCloudNamedEnvironmentView {
 	agentCount: number;
 	/** Most recent agent updatedAt across the environment's agents (ISO string). */
 	lastActivityAt?: string;
+	/** True when every agent that used this environment is archived (the env is gone). */
+	archived?: boolean;
 }
 
 /** A cloud agent with an in-flight run (status ACTIVE with a latestRunId). */
@@ -331,12 +333,14 @@ export function deriveCursorCloudNamedEnvironments(
 	for (const agent of agents ?? []) {
 		const name = getCloudEnvironmentName(agent);
 		if (name === undefined) continue;
+		const isActive = agent.status === "ACTIVE";
 		const existing = byName.get(name);
 		if (existing) {
 			existing.agentCount += 1;
 			existing.lastActivityAt = laterTimestamp(existing.lastActivityAt, agent.updatedAt);
+			if (isActive) existing.archived = false;
 		} else {
-			byName.set(name, { name, agentCount: 1, lastActivityAt: agent.updatedAt });
+			byName.set(name, { name, agentCount: 1, lastActivityAt: agent.updatedAt, archived: !isActive });
 		}
 	}
 	return [...byName.values()].sort((a, b) => {
