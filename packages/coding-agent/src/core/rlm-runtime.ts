@@ -21,8 +21,8 @@ export interface RlmSpawnHandle {
 	thinking: ThinkingLevel;
 	/** Whether the child actually runs on the fast tier, after clamping to what its model supports. */
 	fast: boolean;
-	/** Cursor cloud agent the child was bound to at spawn, when the agent_id kwarg was used. */
-	cursor_agent_id?: string;
+	/** Named Cursor cloud environment the child was spawned into, when the environment kwarg was used. */
+	cursor_environment?: string;
 }
 
 export type RlmSubagentRegistryStatus = "running" | "completed" | "error";
@@ -140,41 +140,37 @@ export function normalizeRequestedRlmSubagentFastMode(value: unknown): ServiceTi
 /** Provider id of Cursor cloud agent models (e.g. cursor/cloud-agent). */
 export const CURSOR_CLOUD_PROVIDER_ID = "cursor";
 
-const CURSOR_CLOUD_AGENT_ID_PREFIX = "bc-";
-
 /**
  * Cursor cloud environment targeting for a spawned subagent.
  *
  * Only meaningful when the resolved child model belongs to the cursor provider; the spawn
  * path rejects these kwargs for any other model instead of silently dropping them.
+ *
+ * A named `environment` is mutually exclusive with `repos`: the environment has its repos
+ * baked in, so when it is present it wins and repos/tunnel are dropped.
  */
 export interface RlmCursorCloudTarget {
-	/** Existing cloud agent id (`bc-...`) to send the task to as a follow-up run. */
-	agentId?: string;
-	/** GitHub repo URLs cloned into the cloud VM when a new agent has to be created. */
+	/** Named cloud environment (`env: {type: "cloud", name}`) to create the child agent in. */
+	environment?: string;
+	/** GitHub repo URLs cloned into the cloud VM for an unnamed environment. */
 	repos?: string[];
 	/** Tunnel preamble preference for newly created agents; the provider default applies when unset. */
 	tunnel?: boolean;
 }
 
-/** Validate and normalize an orchestrator-supplied Cursor cloud agent id. */
-export function normalizeRequestedRlmSubagentCursorAgentId(value: unknown): string | undefined {
+/** Validate and normalize an orchestrator-supplied Cursor cloud environment name. */
+export function normalizeRequestedRlmSubagentCursorEnvironment(value: unknown): string | undefined {
 	if (value === undefined) {
 		return undefined;
 	}
 	if (typeof value !== "string") {
-		throw new Error("rlm.run agent_id must be a string");
+		throw new Error("rlm.run environment must be a string");
 	}
-	const agentId = value.trim();
-	if (!agentId) {
-		throw new Error("rlm.run agent_id must not be empty");
+	const environment = value.trim();
+	if (!environment) {
+		throw new Error("rlm.run environment must not be empty");
 	}
-	if (!agentId.startsWith(CURSOR_CLOUD_AGENT_ID_PREFIX)) {
-		throw new Error(
-			`rlm.run agent_id must be a Cursor cloud agent id starting with "${CURSOR_CLOUD_AGENT_ID_PREFIX}"`,
-		);
-	}
-	return agentId;
+	return environment;
 }
 
 /** Validate and normalize orchestrator-supplied GitHub repos for a fresh Cursor cloud environment. */
@@ -216,23 +212,22 @@ export function normalizeRequestedRlmSubagentCursorTunnel(value: unknown): boole
  * Bind a child agent's stream function to a Cursor cloud environment target.
  *
  * Cursor models receive the target on every stream call as provider options
- * (`agentId`/`repos`/`tunnel`, plus `metadata.cursorAgentId`), which the cursor provider's
- * streamSimple maps onto its CursorOptions. Models from any other provider pass through
- * untouched, so a child that switches models mid-run never leaks the target into a
- * non-cursor request.
+ * (`environment`, or `repos`/`tunnel` when no named environment was requested), which the
+ * cursor provider's streamSimple maps onto its CursorOptions. A named environment is
+ * mutually exclusive with repos, so it is injected alone. Models from any other provider
+ * pass through untouched, so a child that switches models mid-run never leaks the target
+ * into a non-cursor request.
  */
 export function wrapRlmSubagentStreamFnWithCursorTarget(streamFn: StreamFn, target: RlmCursorCloudTarget): StreamFn {
 	return (model, context, options) => {
 		if (model.provider !== CURSOR_CLOUD_PROVIDER_ID) {
 			return streamFn(model, context, options);
 		}
-		const metadata = target.agentId ? { ...options?.metadata, cursorAgentId: target.agentId } : options?.metadata;
 		const targeted = {
 			...options,
-			...(target.agentId ? { agentId: target.agentId } : {}),
-			...(target.repos ? { repos: target.repos } : {}),
-			...(target.tunnel !== undefined ? { tunnel: target.tunnel } : {}),
-			...(metadata ? { metadata } : {}),
+			...(target.environment ? { environment: target.environment } : {}),
+			...(!target.environment && target.repos ? { repos: target.repos } : {}),
+			...(!target.environment && target.tunnel !== undefined ? { tunnel: target.tunnel } : {}),
 		} as SimpleStreamOptions;
 		return streamFn(model, context, targeted);
 	};

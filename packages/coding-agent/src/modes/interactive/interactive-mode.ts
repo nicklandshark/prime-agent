@@ -82,11 +82,7 @@ import {
 	DEFAULT_HEARTBEAT_DELIVERY_MODE,
 	parseHeartbeatCommand,
 } from "../../core/cron-jobs.js";
-import {
-	type CursorCloudEnvironmentView,
-	getCachedCursorCloudEnvironments,
-	listCursorCloudEnvironments,
-} from "../../core/cursor-cloud-environments.js";
+import { getCachedCursorCloudEnvironments, listCursorCloudEnvironments } from "../../core/cursor-cloud-environments.js";
 import type {
 	AutocompleteProviderFactory,
 	ContextUsage,
@@ -192,7 +188,10 @@ import { ConfigurationMenuComponent, type ConfigurationMenuTab } from "./compone
 import { formatContextTree } from "./components/context-tree-format.js";
 import { isCompactAgentMessageNeighbor } from "./components/conversation-components.js";
 import { CountdownTimer } from "./components/countdown-timer.js";
-import { CursorCloudEnvironmentsComponent } from "./components/cursor-cloud-environments.js";
+import {
+	CursorCloudEnvironmentsComponent,
+	formatCursorCloudSelectionStatus,
+} from "./components/cursor-cloud-environments.js";
 import { CustomEditor } from "./components/custom-editor.js";
 import { CustomMessageComponent } from "./components/custom-message.js";
 import { DaxnutsComponent } from "./components/daxnuts.js";
@@ -8112,8 +8111,10 @@ export class InteractiveMode {
 
 	/**
 	 * /cursor-cloud: full-pane viewer for the user's Cursor cloud environments.
-	 * Registry rows render immediately; live server state is fetched in the
+	 * Cached rows render immediately; live server state is fetched in the
 	 * background and swapped in via updateEnvironments (aborted on close).
+	 * Selecting a row only shows a status line — the viewer never prefills the
+	 * editor.
 	 */
 	private showCursorCloudEnvironments(): Promise<void> {
 		const cached = getCachedCursorCloudEnvironments();
@@ -8134,17 +8135,9 @@ export class InteractiveMode {
 				this.ui,
 				cached,
 				{
-					onSelect: (environment: CursorCloudEnvironmentView) => {
+					onSelect: (selection) => {
 						finish();
-						// Prefill a ready-to-run rlm(...) spawn targeting this environment; the
-						// user edits the task and submits, and the model spawns the subagent
-						// onto the selected Cursor cloud environment.
-						this.editor.setText(
-							`await rlm("${environment.name}: ", model="cursor/cloud-agent", agent_id="${environment.agentId}")`,
-						);
-						this.showStatus(
-							`Spawning on ${environment.name} — edit the task and submit (agent_id=${environment.agentId})`,
-						);
+						this.showStatus(formatCursorCloudSelectionStatus(selection));
 					},
 					onCancel: finish,
 				},
@@ -8157,7 +8150,7 @@ export class InteractiveMode {
 			listCursorCloudEnvironments({ signal: abort.signal })
 				.then((result) => {
 					if (settled) return;
-					component.updateEnvironments(result.environments, false, result.serverError);
+					component.updateEnvironments(result, false, result.serverError);
 				})
 				.catch(() => {
 					if (settled) return;

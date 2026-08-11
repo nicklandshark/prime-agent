@@ -1,14 +1,14 @@
 import { Agent, type StreamFn } from "@earendil-works/pi-agent-core";
 import type { Context, Model, SimpleStreamOptions, StreamOptions } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai";
-import { describe, expect, it, vi } from "vitest";
+import { fauxAssistantMessage, registerFauxProvider, streamSimpleCursor } from "@earendil-works/pi-ai";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../../src/core/agent-session.js";
 import type { HostRequestHandlers } from "../../src/core/kernel/index.js";
 import { convertToLlm } from "../../src/core/messages.js";
 import { ModelRegistry } from "../../src/core/model-registry.js";
 import {
 	type CreateRlmSubagentRuntimeOptions,
-	normalizeRequestedRlmSubagentCursorAgentId,
+	normalizeRequestedRlmSubagentCursorEnvironment,
 	normalizeRequestedRlmSubagentCursorRepos,
 	normalizeRequestedRlmSubagentCursorTunnel,
 	type RlmCursorCloudTarget,
@@ -21,12 +21,12 @@ import { createTestResourceLoader } from "../utilities.js";
 import { createHarness, type Harness } from "./harness.js";
 
 const CURSOR_API = "cursor-cloud-agents";
-const AGENT_ID = "bc-66d015af-aaaa-4bbb-8ccc-dddddddddddd";
+const ENVIRONMENT = "sedona-agent";
 const REPO = "https://github.com/org/repo";
 
 /** Options the cursor provider reads, as seen by a faux provider standing in for its api. */
 type CapturedStreamOptions = StreamOptions & {
-	agentId?: string;
+	environment?: string;
 	repos?: string[];
 	tunnel?: boolean;
 };
@@ -77,13 +77,12 @@ function registerCursorCloudModel(harness: Harness): void {
 }
 
 describe("rlm.run cursor cloud kwarg normalizers", () => {
-	it("accepts, trims, and rejects agent ids", () => {
-		expect(normalizeRequestedRlmSubagentCursorAgentId(undefined)).toBeUndefined();
-		expect(normalizeRequestedRlmSubagentCursorAgentId(`  ${AGENT_ID}  `)).toBe(AGENT_ID);
-		expect(() => normalizeRequestedRlmSubagentCursorAgentId(42)).toThrow("rlm.run agent_id must be a string");
-		expect(() => normalizeRequestedRlmSubagentCursorAgentId("   ")).toThrow("rlm.run agent_id must not be empty");
-		expect(() => normalizeRequestedRlmSubagentCursorAgentId("cloud-agent")).toThrow(
-			'rlm.run agent_id must be a Cursor cloud agent id starting with "bc-"',
+	it("accepts, trims, and rejects environment names", () => {
+		expect(normalizeRequestedRlmSubagentCursorEnvironment(undefined)).toBeUndefined();
+		expect(normalizeRequestedRlmSubagentCursorEnvironment(`  ${ENVIRONMENT}  `)).toBe(ENVIRONMENT);
+		expect(() => normalizeRequestedRlmSubagentCursorEnvironment(42)).toThrow("rlm.run environment must be a string");
+		expect(() => normalizeRequestedRlmSubagentCursorEnvironment("   ")).toThrow(
+			"rlm.run environment must not be empty",
 		);
 	});
 
@@ -125,30 +124,37 @@ describe("wrapRlmSubagentStreamFnWithCursorTarget", () => {
 		return { baseMock, wrapped };
 	}
 
-	it("injects the target as provider options and metadata for cursor models", () => {
-		const { baseMock, wrapped } = wrap({ agentId: AGENT_ID, repos: [REPO], tunnel: false });
+	it("injects a named environment on its own for cursor models", () => {
+		const { baseMock, wrapped } = wrap({ environment: ENVIRONMENT });
 		wrapped(cursorModel, context, { sessionId: "s-1" });
 		expect(baseMock).toHaveBeenCalledWith(
 			cursorModel,
 			context,
-			expect.objectContaining({
-				sessionId: "s-1",
-				agentId: AGENT_ID,
-				repos: [REPO],
-				tunnel: false,
-				metadata: { cursorAgentId: AGENT_ID },
-			}),
+			expect.objectContaining({ sessionId: "s-1", environment: ENVIRONMENT }),
 		);
+		const options = baseMock.mock.calls[0]![2]! as CapturedStreamOptions;
+		expect(options).not.toHaveProperty("repos");
+		expect(options).not.toHaveProperty("tunnel");
+		expect(options).not.toHaveProperty("metadata");
 	});
 
-	it("merges cursorAgentId into existing metadata", () => {
-		const { baseMock, wrapped } = wrap({ agentId: AGENT_ID });
-		wrapped(cursorModel, context, { metadata: { other: "kept" } });
-		expect(baseMock).toHaveBeenCalledWith(
-			cursorModel,
-			context,
-			expect.objectContaining({ metadata: { other: "kept", cursorAgentId: AGENT_ID } }),
-		);
+	it("drops repos and tunnel when a named environment is present", () => {
+		const { baseMock, wrapped } = wrap({ environment: ENVIRONMENT, repos: [REPO], tunnel: true });
+		wrapped(cursorModel, context, { sessionId: "s-1" });
+		const options = baseMock.mock.calls[0]![2]! as CapturedStreamOptions;
+		expect(options.environment).toBe(ENVIRONMENT);
+		expect(options).not.toHaveProperty("repos");
+		expect(options).not.toHaveProperty("tunnel");
+	});
+
+	it("injects repos and tunnel for an unnamed environment", () => {
+		const { baseMock, wrapped } = wrap({ repos: [REPO], tunnel: false });
+		wrapped(cursorModel, context, { sessionId: "s-1" });
+		const options = baseMock.mock.calls[0]![2]! as CapturedStreamOptions;
+		expect(options.repos).toEqual([REPO]);
+		expect(options.tunnel).toBe(false);
+		expect(options).not.toHaveProperty("environment");
+		expect(options).not.toHaveProperty("metadata");
 	});
 
 	it("omits absent target fields instead of overriding provider defaults", () => {
@@ -156,13 +162,13 @@ describe("wrapRlmSubagentStreamFnWithCursorTarget", () => {
 		wrapped(cursorModel, context, { sessionId: "s-1" });
 		const options = baseMock.mock.calls[0]![2]! as CapturedStreamOptions;
 		expect(options.repos).toEqual([REPO]);
-		expect(options).not.toHaveProperty("agentId");
+		expect(options).not.toHaveProperty("environment");
 		expect(options).not.toHaveProperty("tunnel");
 		expect(options).not.toHaveProperty("metadata");
 	});
 
 	it("passes non-cursor models through untouched", () => {
-		const { baseMock, wrapped } = wrap({ agentId: AGENT_ID, repos: [REPO], tunnel: true });
+		const { baseMock, wrapped } = wrap({ environment: ENVIRONMENT, repos: [REPO], tunnel: true });
 		const fauxModel = { provider: "faux", api: "faux", id: "faux-1" } as Model<never>;
 		const options = { sessionId: "s-2" } as SimpleStreamOptions;
 		wrapped(fauxModel, context, options);
@@ -174,7 +180,7 @@ describe("rlm.run cursor cloud spawn contract", () => {
 	it("rejects cursor kwargs when the resolved child model is not a cursor model", async () => {
 		const harness = await createHarness();
 		try {
-			await expect(harness.session.runRlmChild("fix the test", { agent_id: AGENT_ID })).rejects.toThrow(
+			await expect(harness.session.runRlmChild("fix the test", { environment: ENVIRONMENT })).rejects.toThrow(
 				"require a cursor model",
 			);
 			await expect(harness.session.runRlmChild("fix the test", { repos: [REPO] })).rejects.toThrow(
@@ -189,21 +195,38 @@ describe("rlm.run cursor cloud spawn contract", () => {
 		}
 	});
 
-	it("still rejects unknown kwargs", async () => {
+	it("rejects a cursor model spawn that omits the environment kwarg", async () => {
+		const harness = await createHarness({ api: CURSOR_API, provider: "cursor", models: [{ id: "cloud-agent" }] });
+		harness.setResponses([fauxAssistantMessage("cloud answer")]);
+		try {
+			await expect(harness.session.runRlmChild("fix the test", {})).rejects.toThrow(
+				'rlm.run on a cursor cloud agent requires an environment kwarg (a named cloud environment, e.g. environment="sedona-agent")',
+			);
+			// repos alone no longer spawns: a named environment is required for cursor models.
+			await expect(harness.session.runRlmChild("fix the test", { repos: [REPO] })).rejects.toThrow(
+				"requires an environment kwarg",
+			);
+			expect((await harness.session.listRlmSubagents()).subagents).toEqual([]);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("still rejects unknown kwargs, including the removed agent_id", async () => {
 		const harness = await createHarness();
 		try {
-			await expect(harness.session.runRlmChild("fix the test", { agentId: AGENT_ID })).rejects.toThrow(
-				"Unsupported rlm.run kwargs: agentId",
-			);
-			await expect(harness.session.runRlmChild("fix the test", { cursor_agent_id: AGENT_ID })).rejects.toThrow(
-				"Unsupported rlm.run kwargs: cursor_agent_id",
+			await expect(
+				harness.session.runRlmChild("fix the test", { agent_id: "bc-66d015af-aaaa-4bbb-8ccc-dddddddddddd" }),
+			).rejects.toThrow("Unsupported rlm.run kwargs: agent_id");
+			await expect(harness.session.runRlmChild("fix the test", { cursor_environment: ENVIRONMENT })).rejects.toThrow(
+				"Unsupported rlm.run kwargs: cursor_environment",
 			);
 		} finally {
 			harness.cleanup();
 		}
 	});
 
-	it("threads agent_id, repos, and tunnel to the cursor provider stream options", async () => {
+	it("threads environment to the cursor provider stream options", async () => {
 		const harness = await createHarness({ api: CURSOR_API, provider: "cursor", models: [{ id: "cloud-agent" }] });
 		const calls: CapturedCall[] = [];
 		harness.setResponses([
@@ -214,45 +237,18 @@ describe("rlm.run cursor cloud spawn contract", () => {
 		]);
 		try {
 			const handle = await harness.session.runRlmChild("fix the test", {
-				agent_id: AGENT_ID,
-				repos: [REPO],
-				tunnel: false,
+				model: "cursor/cloud-agent",
+				environment: ENVIRONMENT,
 			});
 
 			expect(handle.model).toBe("cursor/cloud-agent");
-			expect(handle.cursor_agent_id).toBe(AGENT_ID);
+			expect(handle.cursor_environment).toBe(ENVIRONMENT);
 			await vi.waitFor(() => {
 				expect(calls.some(isChildTaskCall)).toBe(true);
 			});
 			const childCall = calls.find(isChildTaskCall)!;
-			expect(childCall.options?.agentId).toBe(AGENT_ID);
-			expect(childCall.options?.repos).toEqual([REPO]);
-			expect(childCall.options?.tunnel).toBe(false);
-			expect(childCall.options?.metadata?.cursorAgentId).toBe(AGENT_ID);
-		} finally {
-			harness.cleanup();
-		}
-	});
-
-	it("spawns a fresh environment from repos alone, leaving provider defaults intact", async () => {
-		const harness = await createHarness({ api: CURSOR_API, provider: "cursor", models: [{ id: "cloud-agent" }] });
-		const calls: CapturedCall[] = [];
-		harness.setResponses([
-			(context, options) => {
-				calls.push({ context, options: options as CapturedStreamOptions | undefined });
-				return fauxAssistantMessage("cloud answer");
-			},
-		]);
-		try {
-			const handle = await harness.session.runRlmChild("build x", { repos: [REPO] });
-
-			expect(handle).not.toHaveProperty("cursor_agent_id");
-			await vi.waitFor(() => {
-				expect(calls.some(isChildTaskCall)).toBe(true);
-			});
-			const childCall = calls.find(isChildTaskCall)!;
-			expect(childCall.options?.repos).toEqual([REPO]);
-			expect(childCall.options).not.toHaveProperty("agentId");
+			expect(childCall.options?.environment).toBe(ENVIRONMENT);
+			expect(childCall.options).not.toHaveProperty("repos");
 			expect(childCall.options).not.toHaveProperty("tunnel");
 			expect(childCall.options?.metadata?.cursorAgentId).toBeUndefined();
 		} finally {
@@ -260,24 +256,53 @@ describe("rlm.run cursor cloud spawn contract", () => {
 		}
 	});
 
-	it("resolves an explicit cursor model for a non-cursor parent and threads the target", async () => {
+	it("drops repos and tunnel when environment is present", async () => {
+		const harness = await createHarness({ api: CURSOR_API, provider: "cursor", models: [{ id: "cloud-agent" }] });
+		const calls: CapturedCall[] = [];
+		harness.setResponses([
+			(context, options) => {
+				calls.push({ context, options: options as CapturedStreamOptions | undefined });
+				return fauxAssistantMessage("cloud answer");
+			},
+		]);
+		try {
+			const handle = await harness.session.runRlmChild("fix the test", {
+				model: "cursor/cloud-agent",
+				environment: ENVIRONMENT,
+				repos: [REPO],
+				tunnel: false,
+			});
+
+			expect(handle.cursor_environment).toBe(ENVIRONMENT);
+			await vi.waitFor(() => {
+				expect(calls.some(isChildTaskCall)).toBe(true);
+			});
+			const childCall = calls.find(isChildTaskCall)!;
+			expect(childCall.options?.environment).toBe(ENVIRONMENT);
+			expect(childCall.options).not.toHaveProperty("repos");
+			expect(childCall.options).not.toHaveProperty("tunnel");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("resolves an explicit cursor model for a non-cursor parent and threads the environment", async () => {
 		const harness = await createHarness();
 		const { faux, calls } = captureCursorStreams();
 		registerCursorCloudModel(harness);
 		try {
 			const handle = await harness.session.runRlmChild("fix the test", {
 				model: "cursor/cloud-agent",
-				agent_id: AGENT_ID,
+				environment: ENVIRONMENT,
 			});
 
 			expect(handle.model).toBe("cursor/cloud-agent");
-			expect(handle.cursor_agent_id).toBe(AGENT_ID);
+			expect(handle.cursor_environment).toBe(ENVIRONMENT);
 			await vi.waitFor(() => {
 				expect(calls.some(isChildTaskCall)).toBe(true);
 			});
 			const childCall = calls.find(isChildTaskCall)!;
-			expect(childCall.options?.agentId).toBe(AGENT_ID);
-			expect(childCall.options?.metadata?.cursorAgentId).toBe(AGENT_ID);
+			expect(childCall.options?.environment).toBe(ENVIRONMENT);
 		} finally {
 			faux.unregister();
 			harness.cleanup();
@@ -296,22 +321,24 @@ describe("rlm.run cursor cloud spawn contract", () => {
 
 			const handle = (await run({
 				prompt: "spawn from the kernel",
-				kwargs: { agent_id: AGENT_ID, repos: [REPO], tunnel: true },
-			})) as { cursor_agent_id?: string };
-			expect(handle.cursor_agent_id).toBe(AGENT_ID);
+				kwargs: { environment: ENVIRONMENT },
+			})) as { cursor_environment?: string };
+			expect(handle.cursor_environment).toBe(ENVIRONMENT);
 
+			await expect(run({ prompt: "bad type", kwargs: { environment: 42 } })).rejects.toThrow(
+				"rlm.run environment must be a string",
+			);
 			await expect(run({ prompt: "bad type", kwargs: { tunnel: "yes" } })).rejects.toThrow(
 				"rlm.run tunnel must be a boolean",
 			);
 			await expect(run({ prompt: "bad type", kwargs: { repos: REPO } })).rejects.toThrow(
 				"rlm.run repos must be an array of GitHub repository URLs",
 			);
-			await expect(run({ prompt: "bad id", kwargs: { agent_id: "nope" } })).rejects.toThrow(
-				'rlm.run agent_id must be a Cursor cloud agent id starting with "bc-"',
+			await expect(run({ prompt: "bad kwarg", kwargs: { agent_id: "bc-nope" } })).rejects.toThrow(
+				"Unsupported rlm.run kwargs: agent_id",
 			);
-			await expect(run({ prompt: "bad kwarg", kwargs: { agentId: AGENT_ID } })).rejects.toThrow(
-				"Unsupported rlm.run kwargs: agentId",
-			);
+			// The kernel path enforces the same required-environment contract for cursor models.
+			await expect(run({ prompt: "missing env", kwargs: {} })).rejects.toThrow("requires an environment kwarg");
 		} finally {
 			harness.cleanup();
 		}
@@ -348,22 +375,110 @@ describe("rlm.run cursor cloud spawn contract", () => {
 		try {
 			const handle = await harness.session.runRlmChild("fix the test", {
 				model: "cursor/cloud-agent",
-				agent_id: AGENT_ID,
-				tunnel: true,
+				environment: ENVIRONMENT,
 			});
 
-			expect(handle.cursor_agent_id).toBe(AGENT_ID);
-			expect(capturedOptions?.cursor).toEqual({ agentId: AGENT_ID, tunnel: true });
+			expect(handle.cursor_environment).toBe(ENVIRONMENT);
+			expect(capturedOptions?.cursor).toEqual({ environment: ENVIRONMENT });
 			await vi.waitFor(() => {
 				expect(calls.some(isChildTaskCall)).toBe(true);
 			});
 			const childCall = calls.find(isChildTaskCall)!;
-			expect(childCall.options?.agentId).toBe(AGENT_ID);
-			expect(childCall.options?.tunnel).toBe(true);
-			expect(childCall.options?.metadata?.cursorAgentId).toBe(AGENT_ID);
+			expect(childCall.options?.environment).toBe(ENVIRONMENT);
+			expect(childCall.options).not.toHaveProperty("repos");
+			expect(childCall.options).not.toHaveProperty("tunnel");
 		} finally {
 			faux.unregister();
 			harness.cleanup();
 		}
+	});
+});
+
+describe("cursor provider environment mapping", () => {
+	const model = {
+		id: "composer-2.5",
+		name: "Composer 2.5",
+		api: CURSOR_API,
+		provider: "cursor",
+		baseUrl: "https://api.cursor.com",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200000,
+		maxTokens: 8192,
+	} as unknown as Model<"cursor-cloud-agents">;
+
+	const context: Context = {
+		messages: [{ role: "user", content: "do the thing", timestamp: Date.now() }],
+	};
+
+	interface CapturedRequest {
+		url: string;
+		method?: string;
+		body?: Record<string, unknown>;
+	}
+
+	function stubCursorApi() {
+		const requests: CapturedRequest[] = [];
+		vi.stubGlobal("fetch", async (input: unknown, init?: RequestInit) => {
+			const url = String(input);
+			const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : undefined;
+			requests.push({ url, method: init?.method, body });
+			if (url.endsWith("/v1/agents") && init?.method === "POST") {
+				return new Response(JSON.stringify({ agent: { id: "bc-test" }, run: { id: "run-1" } }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			if (url.includes("/runs/run-1/stream")) {
+				const sse = 'event: result\ndata: {"status":"FINISHED","text":"cloud answer"}\n\nevent: done\ndata: {}\n\n';
+				return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+			}
+			if (url.includes("/usage")) {
+				return new Response(JSON.stringify({}), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			throw new Error(`Unexpected fetch: ${init?.method ?? "GET"} ${url}`);
+		});
+		return requests;
+	}
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it("sends env and omits repos on create when a named environment is set", async () => {
+		const requests = stubCursorApi();
+		const stream = streamSimpleCursor(model, context, {
+			apiKey: "faux-cursor-key",
+			environment: ENVIRONMENT,
+			repos: [REPO],
+			tunnel: false,
+		} as SimpleStreamOptions);
+		const message = await stream.result();
+
+		expect(message.stopReason).toBe("stop");
+		const create = requests.find((request) => request.url.endsWith("/v1/agents") && request.method === "POST");
+		expect(create).toBeDefined();
+		expect(create!.body?.env).toEqual({ type: "cloud", name: ENVIRONMENT });
+		expect(create!.body).not.toHaveProperty("repos");
+	});
+
+	it("sends repos and no env on create for an unnamed environment", async () => {
+		const requests = stubCursorApi();
+		const stream = streamSimpleCursor(model, context, {
+			apiKey: "faux-cursor-key",
+			repos: [REPO],
+			tunnel: false,
+		} as SimpleStreamOptions);
+		const message = await stream.result();
+
+		expect(message.stopReason).toBe("stop");
+		const create = requests.find((request) => request.url.endsWith("/v1/agents") && request.method === "POST");
+		expect(create).toBeDefined();
+		expect(create!.body?.repos).toEqual([{ url: REPO }]);
+		expect(create!.body).not.toHaveProperty("env");
 	});
 });

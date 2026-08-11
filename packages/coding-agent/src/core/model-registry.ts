@@ -29,6 +29,7 @@ import type { Validator } from "typebox/compile";
 import type { TLocalizedValidationError } from "typebox/error";
 import { getAgentDir } from "../config.js";
 import { type AuthSourceToken, type AuthStatus, type AuthStorage, OPENAI_CODEX_PROVIDER_ID } from "./auth-storage.js";
+import { CURSOR_CLOUD_PROVIDER_ID } from "./cursor-cloud-environments.js";
 import { OpenAICodexAccountManager } from "./openai-codex-account-manager.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "./prime-inference-auth.js";
 import {
@@ -959,6 +960,11 @@ export class ModelRegistry {
 		}
 	}
 
+	/**
+	 * Model catalog for user-facing pickers (e.g. /model). Cursor cloud agent
+	 * models are excluded here so they stay subagent-only: they remain in
+	 * getAll()/getAvailable()/getExecutableModels() for rlm resolution.
+	 */
 	async refreshModelCatalog(): Promise<ModelCatalogSnapshot> {
 		const availableModels = await this.refreshAvailableModels();
 		const availablePrivateModels = new Set(
@@ -967,9 +973,16 @@ export class ModelRegistry {
 		return {
 			models: this.models.filter(
 				(model) =>
-					!isPrivatePrimeInferenceModel(model) || availablePrivateModels.has(`${model.provider}/${model.id}`),
+					model.provider !== CURSOR_CLOUD_PROVIDER_ID &&
+					(!isPrivatePrimeInferenceModel(model) || availablePrivateModels.has(`${model.provider}/${model.id}`)),
 			),
-			configuredProviders: [...new Set(availableModels.map((model) => model.provider))],
+			configuredProviders: [
+				...new Set(
+					availableModels
+						.filter((model) => model.provider !== CURSOR_CLOUD_PROVIDER_ID)
+						.map((model) => model.provider),
+				),
+			],
 		};
 	}
 

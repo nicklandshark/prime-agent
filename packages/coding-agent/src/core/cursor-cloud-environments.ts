@@ -1,11 +1,15 @@
 /**
  * Cursor cloud environment registry + server listing.
  *
- * The local tunnel registry (~/.prime/agent/cursor-cloud.json, mode 0600)
- * records which Cursor cloud agents this machine can reach over SSH and how
- * (bore.pub tunnel or tailscale). The Cursor Cloud Agents API is the server
- * truth for which agents still exist; there is no /v1/environments endpoint,
- * so environments are derived by joining the registry onto GET /v1/agents.
+ * The /cursor-cloud viewer is a pure viewer (not a spawn launcher) with two
+ * sections:
+ *
+ * - Named cloud environments: where task cloud agents run. There is no
+ *   /v1/environments endpoint, so they are derived from GET /v1/agents by
+ *   collecting distinct env.name values where env.type == "cloud".
+ * - Builder environments: the SSH-tunnel VMs recorded in the local tunnel
+ *   registry (~/.prime/agent/cursor-cloud.json, mode 0600), joined with
+ *   GET /v1/agents for liveness. Local subagents tunnel into these.
  *
  * Secrets are never logged or embedded in error messages.
  */
@@ -70,8 +74,37 @@ export interface CursorCloudEnvironmentView {
 	latestRunId?: string;
 }
 
-export interface CursorCloudEnvironmentsResult {
-	environments: CursorCloudEnvironmentView[];
+/**
+ * A named cloud environment where task cloud agents run, derived from the
+ * server agent list (distinct env.name where env.type == "cloud").
+ */
+export interface CursorCloudNamedEnvironmentView {
+	name: string;
+	/** How many cloud agents have run in this environment. */
+	agentCount: number;
+	/** Most recent agent updatedAt across the environment's agents (ISO string). */
+	lastActivityAt?: string;
+}
+
+/** A cloud agent with an in-flight run (status ACTIVE with a latestRunId). */
+export interface CursorCloudActiveRunView {
+	agentId: string;
+	agentName?: string;
+	/** Named cloud environment the agent runs in, when it has one. */
+	environmentName?: string;
+	latestRunId: string;
+	updatedAt?: string;
+}
+
+/** The two viewer sections plus current activity. */
+export interface CursorCloudEnvironmentsView {
+	namedEnvironments: CursorCloudNamedEnvironmentView[];
+	builderEnvironments: CursorCloudEnvironmentView[];
+	/** Active runs; undefined when the server was not queried. */
+	activeRuns?: CursorCloudActiveRunView[];
+}
+
+export interface CursorCloudEnvironmentsResult extends CursorCloudEnvironmentsView {
 	/** Human-readable note when server data is unavailable (views are registry-only). */
 	serverError?: string;
 }
@@ -260,27 +293,111 @@ export function joinCursorCloudEnvironments(
 	return views;
 }
 
-/** Registry-only views for immediate display before the server responds. */
-export function getCachedCursorCloudEnvironments(agentDir: string = getAgentDir()): CursorCloudEnvironmentView[] {
-	return joinCursorCloudEnvironments(readCursorCloudRegistry(agentDir), undefined);
+/**
+ * The agent's named cloud environment: env.name when env is an object with
+ * type "cloud" and a non-empty name. Anything else (missing env, other types,
+ * malformed entries) yields undefined.
+ */
+function getCloudEnvironmentName(agent: CursorCloudAgentSummary): string | undefined {
+	const env = agent.env;
+	if (!env || typeof env !== "object" || Array.isArray(env)) {
+		return undefined;
+	}
+	const { type, name } = env as { type?: unknown; name?: unknown };
+	if (type !== "cloud" || typeof name !== "string") {
+		return undefined;
+	}
+	const trimmed = name.trim();
+	return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/** Newer of two ISO timestamps; undefined values lose. Lexicographic compare is safe for ISO 8601. */
+function laterTimestamp(a: string | undefined, b: string | undefined): string | undefined {
+	if (a === undefined) return b;
+	if (b === undefined) return a;
+	return a >= b ? a : b;
 }
 
 /**
- * Full environment listing: registry joined with live server data. Network or
- * auth failures fall back to a registry-only view with a `serverError` note;
- * abort errors are rethrown so callers can distinguish cancellation.
+ * Derive the named cloud environments from the server agent list: distinct
+ * env.name where env.type == "cloud", with the number of agents that used
+ * each and the most recent activity. Sorted by latest activity (most recent
+ * first), then by name.
+ */
+export function deriveCursorCloudNamedEnvironments(
+	agents: CursorCloudAgentSummary[] | undefined,
+): CursorCloudNamedEnvironmentView[] {
+	const byName = new Map<string, CursorCloudNamedEnvironmentView>();
+	for (const agent of agents ?? []) {
+		const name = getCloudEnvironmentName(agent);
+		if (name === undefined) continue;
+		const existing = byName.get(name);
+		if (existing) {
+			existing.agentCount += 1;
+			existing.lastActivityAt = laterTimestamp(existing.lastActivityAt, agent.updatedAt);
+		} else {
+			byName.set(name, { name, agentCount: 1, lastActivityAt: agent.updatedAt });
+		}
+	}
+	return [...byName.values()].sort((a, b) => {
+		if (a.lastActivityAt !== undefined && b.lastActivityAt !== undefined && a.lastActivityAt !== b.lastActivityAt) {
+			return b.lastActivityAt.localeCompare(a.lastActivityAt);
+		}
+		if (a.lastActivityAt !== undefined && b.lastActivityAt === undefined) return -1;
+		if (a.lastActivityAt === undefined && b.lastActivityAt !== undefined) return 1;
+		return a.name.localeCompare(b.name);
+	});
+}
+
+/**
+ * Derive current activity from the server agent list: agents that are ACTIVE
+ * with a run in flight (latestRunId), most recently updated first.
+ */
+export function deriveCursorCloudActiveRuns(agents: CursorCloudAgentSummary[] | undefined): CursorCloudActiveRunView[] {
+	const runs: CursorCloudActiveRunView[] = [];
+	for (const agent of agents ?? []) {
+		if (agent.status !== "ACTIVE") continue;
+		if (typeof agent.latestRunId !== "string" || agent.latestRunId.length === 0) continue;
+		runs.push({
+			agentId: agent.id,
+			agentName: agent.name,
+			environmentName: getCloudEnvironmentName(agent),
+			latestRunId: agent.latestRunId,
+			updatedAt: agent.updatedAt,
+		});
+	}
+	return runs.sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
+}
+
+/** Registry-only views for immediate display before the server responds. */
+export function getCachedCursorCloudEnvironments(agentDir: string = getAgentDir()): CursorCloudEnvironmentsView {
+	return {
+		namedEnvironments: [],
+		builderEnvironments: joinCursorCloudEnvironments(readCursorCloudRegistry(agentDir), undefined),
+	};
+}
+
+/**
+ * Full environment listing: named cloud environments derived from the server
+ * agent list, builder environments from the registry joined with live server
+ * data, and current active runs. Network or auth failures fall back to a
+ * registry-only view with a `serverError` note; abort errors are rethrown so
+ * callers can distinguish cancellation.
  */
 export async function listCursorCloudEnvironments(
 	options: ListCursorCloudEnvironmentsOptions = {},
 ): Promise<CursorCloudEnvironmentsResult> {
 	const agentDir = options.agentDir ?? getAgentDir();
 	const registry = readCursorCloudRegistry(agentDir);
-	const registryOnly = () => joinCursorCloudEnvironments(registry, undefined, options);
+	const registryOnly = (): CursorCloudEnvironmentsResult => ({
+		namedEnvironments: [],
+		builderEnvironments: joinCursorCloudEnvironments(registry, undefined, options),
+	});
 
 	const apiKey = options.apiKey ?? resolveCursorCloudApiKey(agentDir);
 	if (!apiKey) {
 		return {
-			environments: registryOnly(),
+			...registryOnly(),
 			serverError: `no Cursor API key (set ${CURSOR_API_KEY_ENV} or add a "${CURSOR_CLOUD_PROVIDER_ID}" credential via /login)`,
 		};
 	}
@@ -291,13 +408,17 @@ export async function listCursorCloudEnvironments(
 			signal: options.signal,
 			fetchImpl: options.fetchImpl,
 		});
-		return { environments: joinCursorCloudEnvironments(registry, agents, options) };
+		return {
+			namedEnvironments: deriveCursorCloudNamedEnvironments(agents),
+			builderEnvironments: joinCursorCloudEnvironments(registry, agents, options),
+			activeRuns: deriveCursorCloudActiveRuns(agents),
+		};
 	} catch (error) {
 		if (options.signal?.aborted) {
 			throw error;
 		}
 		return {
-			environments: registryOnly(),
+			...registryOnly(),
 			serverError: `server unreachable (${error instanceof Error ? error.message : String(error)})`,
 		};
 	}

@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	type CursorCloudAgentSummary,
 	type CursorCloudTunnelRegistryEntry,
+	deriveCursorCloudActiveRuns,
+	deriveCursorCloudNamedEnvironments,
 	formatCursorCloudSshTarget,
 	getCachedCursorCloudEnvironments,
 	joinCursorCloudEnvironments,
@@ -241,17 +243,105 @@ describe("cursor-cloud-environments core", () => {
 		});
 	});
 
+	describe("deriveCursorCloudNamedEnvironments", () => {
+		it("collects distinct env.name values where env.type is cloud", () => {
+			const views = deriveCursorCloudNamedEnvironments([
+				makeAgent({ env: { type: "cloud", name: "sedona-agent" } }),
+				makeAgent({ id: "bc-bbb", env: { type: "cloud", name: "x-plugin" } }),
+				makeAgent({ id: "bc-ccc", env: { type: "cloud", name: "sedona-agent" } }),
+			]);
+
+			expect(views.map((view) => view.name).sort()).toEqual(["sedona-agent", "x-plugin"]);
+			const sedona = views.find((view) => view.name === "sedona-agent");
+			expect(sedona?.agentCount).toBe(2);
+		});
+
+		it("ignores agents without a cloud env name", () => {
+			const views = deriveCursorCloudNamedEnvironments([
+				makeAgent({ env: undefined }),
+				makeAgent({ id: "bc-bbb", env: { type: "local", name: "laptop" } }),
+				makeAgent({ id: "bc-ccc", env: { type: "cloud" } }),
+				makeAgent({ id: "bc-ddd", env: { type: "cloud", name: "   " } }),
+				makeAgent({ id: "bc-eee", env: "cloud" }),
+				makeAgent({ id: "bc-fff", env: null }),
+			]);
+
+			expect(views).toEqual([]);
+		});
+
+		it("tracks the most recent updatedAt per environment and sorts by latest activity", () => {
+			const views = deriveCursorCloudNamedEnvironments([
+				makeAgent({
+					env: { type: "cloud", name: "old-env" },
+					updatedAt: "2026-08-01T00:00:00.000Z",
+				}),
+				makeAgent({
+					id: "bc-bbb",
+					env: { type: "cloud", name: "fresh-env" },
+					updatedAt: "2026-08-10T00:00:00.000Z",
+				}),
+				makeAgent({
+					id: "bc-ccc",
+					env: { type: "cloud", name: "old-env" },
+					updatedAt: "2026-08-05T00:00:00.000Z",
+				}),
+			]);
+
+			expect(views.map((view) => view.name)).toEqual(["fresh-env", "old-env"]);
+			expect(views[1]?.lastActivityAt).toBe("2026-08-05T00:00:00.000Z");
+		});
+
+		it("returns an empty list when the server was not queried", () => {
+			expect(deriveCursorCloudNamedEnvironments(undefined)).toEqual([]);
+			expect(deriveCursorCloudNamedEnvironments([])).toEqual([]);
+		});
+	});
+
+	describe("deriveCursorCloudActiveRuns", () => {
+		it("lists ACTIVE agents with a latestRunId, most recently updated first", () => {
+			const runs = deriveCursorCloudActiveRuns([
+				makeAgent({
+					updatedAt: "2026-08-09T00:00:00.000Z",
+					env: { type: "cloud", name: "sedona-agent" },
+				}),
+				makeAgent({ id: "bc-bbb", name: "other", updatedAt: "2026-08-10T00:00:00.000Z", latestRunId: "run-2" }),
+				makeAgent({ id: "bc-ccc", status: "ARCHIVED", latestRunId: "run-3" }),
+				makeAgent({ id: "bc-ddd", status: "ACTIVE", latestRunId: undefined }),
+			]);
+
+			expect(runs.map((run) => run.agentId)).toEqual(["bc-bbb", "bc-aaa"]);
+			expect(runs[1]).toMatchObject({
+				agentName: "ea-tycoon",
+				environmentName: "sedona-agent",
+				latestRunId: "run-1",
+			});
+		});
+
+		it("returns an empty list when the server was not queried", () => {
+			expect(deriveCursorCloudActiveRuns(undefined)).toEqual([]);
+		});
+	});
+
 	describe("listCursorCloudEnvironments", () => {
-		it("joins registry entries with live server data", async () => {
+		it("joins registry entries with live server data and derives named environments and active runs", async () => {
 			writeRegistry({ "ea-tycoon": makeRegistryEntry() });
 			const fetchImpl = vi.fn(async () =>
-				makeResponse({ items: [makeAgent()], nextCursor: null }),
+				makeResponse({
+					items: [
+						makeAgent({ env: { type: "cloud", name: "sedona-agent" } }),
+						makeAgent({ id: "bc-bbb", name: "other", env: { type: "cloud", name: "sedona-agent" } }),
+					],
+					nextCursor: null,
+				}),
 			) as unknown as typeof fetch;
 
 			const result = await listCursorCloudEnvironments({ agentDir, apiKey: "key", fetchImpl });
 
 			expect(result.serverError).toBeUndefined();
-			expect(result.environments[0]?.serverStatus).toBe("ACTIVE");
+			expect(result.builderEnvironments[0]?.serverStatus).toBe("ACTIVE");
+			expect(result.namedEnvironments).toHaveLength(1);
+			expect(result.namedEnvironments[0]).toMatchObject({ name: "sedona-agent", agentCount: 2 });
+			expect(result.activeRuns?.map((run) => run.agentId).sort()).toEqual(["bc-aaa", "bc-bbb"]);
 		});
 
 		it("falls back to registry-only views with a note on network failure", async () => {
@@ -264,7 +354,9 @@ describe("cursor-cloud-environments core", () => {
 
 			expect(result.serverError).toContain("server unreachable");
 			expect(result.serverError).toContain("socket hangup");
-			expect(result.environments[0]?.serverStatus).toBe("unknown");
+			expect(result.namedEnvironments).toEqual([]);
+			expect(result.activeRuns).toBeUndefined();
+			expect(result.builderEnvironments[0]?.serverStatus).toBe("unknown");
 		});
 
 		it("returns registry-only views with a note when no API key is configured", async () => {
@@ -274,7 +366,9 @@ describe("cursor-cloud-environments core", () => {
 			const result = await listCursorCloudEnvironments({ agentDir, fetchImpl });
 
 			expect(result.serverError).toContain("no Cursor API key");
-			expect(result.environments[0]?.serverStatus).toBe("unknown");
+			expect(result.namedEnvironments).toEqual([]);
+			expect(result.activeRuns).toBeUndefined();
+			expect(result.builderEnvironments[0]?.serverStatus).toBe("unknown");
 			expect(fetchImpl).not.toHaveBeenCalled();
 		});
 
@@ -293,15 +387,20 @@ describe("cursor-cloud-environments core", () => {
 	});
 
 	describe("getCachedCursorCloudEnvironments", () => {
-		it("returns registry-only views without any network", () => {
+		it("returns registry-only builder views without any network", () => {
 			writeRegistry({ "ea-tycoon": makeRegistryEntry() });
-			const views = getCachedCursorCloudEnvironments(agentDir);
-			expect(views).toHaveLength(1);
-			expect(views[0]?.serverStatus).toBe("unknown");
+			const view = getCachedCursorCloudEnvironments(agentDir);
+			expect(view.namedEnvironments).toEqual([]);
+			expect(view.activeRuns).toBeUndefined();
+			expect(view.builderEnvironments).toHaveLength(1);
+			expect(view.builderEnvironments[0]?.serverStatus).toBe("unknown");
 		});
 
-		it("returns an empty list when no registry exists", () => {
-			expect(getCachedCursorCloudEnvironments(agentDir)).toEqual([]);
+		it("returns empty sections when no registry exists", () => {
+			expect(getCachedCursorCloudEnvironments(agentDir)).toEqual({
+				namedEnvironments: [],
+				builderEnvironments: [],
+			});
 		});
 	});
 });

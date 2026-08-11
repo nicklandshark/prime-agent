@@ -223,7 +223,7 @@ import {
 	createRlmListSubagentsHostHandler,
 	createRlmRunHostHandler,
 	findRlmModelMatches,
-	normalizeRequestedRlmSubagentCursorAgentId,
+	normalizeRequestedRlmSubagentCursorEnvironment,
 	normalizeRequestedRlmSubagentCursorRepos,
 	normalizeRequestedRlmSubagentCursorTunnel,
 	normalizeRequestedRlmSubagentFastMode,
@@ -9687,7 +9687,7 @@ export class AgentSession {
 			model: rawModel,
 			thinking: rawThinking,
 			fast: rawFast,
-			agent_id: rawAgentId,
+			environment: rawEnvironment,
 			repos: rawRepos,
 			tunnel: rawTunnel,
 			...unsupported
@@ -9700,7 +9700,7 @@ export class AgentSession {
 		const requestedModel = normalizeRequestedRlmSubagentModel(rawModel);
 		const requestedThinkingLevel = normalizeRequestedRlmSubagentThinkingLevel(rawThinking);
 		const requestedServiceTier = normalizeRequestedRlmSubagentFastMode(rawFast);
-		const requestedCursorAgentId = normalizeRequestedRlmSubagentCursorAgentId(rawAgentId);
+		const requestedCursorEnvironment = normalizeRequestedRlmSubagentCursorEnvironment(rawEnvironment);
 		const requestedCursorRepos = normalizeRequestedRlmSubagentCursorRepos(rawRepos);
 		const requestedCursorTunnel = normalizeRequestedRlmSubagentCursorTunnel(rawTunnel);
 		if (requestedSessionName) assertDirectAgentMessageTarget(requestedSessionName);
@@ -9722,19 +9722,28 @@ export class AgentSession {
 		} finally {
 			if (requestedSessionName) this._pendingRlmSubagentSessionNames.delete(requestedSessionName);
 		}
-		const cursorTarget: RlmCursorCloudTarget | undefined =
-			requestedCursorAgentId || requestedCursorRepos || requestedCursorTunnel !== undefined
+		const isCursorModel = modelSelection.model.provider === CURSOR_CLOUD_PROVIDER_ID;
+		// A named cloud environment is mutually exclusive with repos (the environment has
+		// its repos baked in), so when environment is present it wins and repos/tunnel are dropped.
+		const cursorTarget: RlmCursorCloudTarget | undefined = requestedCursorEnvironment
+			? { environment: requestedCursorEnvironment }
+			: requestedCursorRepos || requestedCursorTunnel !== undefined
 				? {
-						...(requestedCursorAgentId ? { agentId: requestedCursorAgentId } : {}),
 						...(requestedCursorRepos ? { repos: requestedCursorRepos } : {}),
 						...(requestedCursorTunnel !== undefined ? { tunnel: requestedCursorTunnel } : {}),
 					}
 				: undefined;
-		if (cursorTarget && modelSelection.model.provider !== CURSOR_CLOUD_PROVIDER_ID) {
+		if (cursorTarget && !isCursorModel) {
 			throw new Error(
-				`rlm.run agent_id, repos, and tunnel target Cursor cloud environments and require a cursor model ` +
+				`rlm.run environment, repos, and tunnel target Cursor cloud environments and require a cursor model ` +
 					`(e.g. ${CURSOR_CLOUD_PROVIDER_ID}/cloud-agent); the resolved subagent model is ` +
 					`${modelSelection.model.provider}/${modelSelection.model.id}`,
+			);
+		}
+		if (isCursorModel && !requestedCursorEnvironment) {
+			throw new Error(
+				`rlm.run on a cursor cloud agent requires an environment kwarg (a named cloud environment, ` +
+					`e.g. environment="sedona-agent")`,
 			);
 		}
 		if (this._disposed || this._disposing) throw new Error("Cannot spawn a subagent after its parent was disposed");
@@ -10059,7 +10068,7 @@ export class AgentSession {
 			model: `${modelSelection.model.provider}/${modelSelection.model.id}`,
 			thinking: subagentOptions.thinkingLevel,
 			fast: subagentOptions.serviceTier === "priority",
-			...(cursorTarget?.agentId ? { cursor_agent_id: cursorTarget.agentId } : {}),
+			...(cursorTarget?.environment ? { cursor_environment: cursorTarget.environment } : {}),
 		};
 	}
 
