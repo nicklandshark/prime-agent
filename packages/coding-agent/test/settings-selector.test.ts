@@ -24,6 +24,7 @@ const config: SettingsConfig = {
 	currentTheme: "dark",
 	availableThemes: ["dark"],
 	hideThinkingBlock: false,
+	mermaidRenderingMode: "streaming",
 	treeFilterMode: "user-only",
 	showHardwareCursor: false,
 	editorPaddingX: 0,
@@ -49,6 +50,7 @@ const callbacks: SettingsCallbacks = {
 	onThinkingLevelChange: () => {},
 	onThemeChange: () => {},
 	onHideThinkingBlockChange: () => {},
+	onMermaidRenderingModeChange: () => {},
 	onTreeFilterModeChange: () => {},
 	onShowHardwareCursorChange: () => {},
 	onEditorPaddingXChange: () => {},
@@ -109,5 +111,19 @@ describe("SettingsSelectorComponent", () => {
 
 		expect(onIdleEvictionMinutesChange).toHaveBeenLastCalledWith(value);
 		expect(stripAnsi(component.render(120).join("\n"))).toContain(String(value));
+	});
+
+	test("shows and changes the Mermaid rendering mode", () => {
+		const onMermaidRenderingModeChange = vi.fn();
+		const component = new SettingsSelectorComponent(config, {
+			...callbacks,
+			onMermaidRenderingModeChange,
+		});
+		const list = component.getSettingsList();
+		for (const character of "mermaid") list.handleInput(character);
+
+		expect(stripAnsi(component.render(120).join("\n"))).toContain("Mermaid diagrams");
+		list.handleInput("\r");
+		expect(onMermaidRenderingModeChange).toHaveBeenCalledWith("off");
 	});
 });

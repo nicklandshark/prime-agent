@@ -1,6 +1,7 @@
 import { Box, type Component, Container, Markdown, type MarkdownTheme, visibleWidth } from "@earendil-works/pi-tui";
 import { parseSlashCommand } from "../../../core/slash-commands.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
+import { createMarkdownTransform, type MarkdownTransformer } from "./markdown-transform.js";
 import { isLeadingSlashCommand } from "./slash-command-message.js";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
@@ -16,7 +17,7 @@ class SlashCommandMarkdown implements Component {
 	private readonly markdown: Markdown;
 	private readonly commandGraphemes: string[];
 
-	constructor(text: string, markdownTheme: MarkdownTheme) {
+	constructor(text: string, markdownTheme: MarkdownTheme, markdownTransformers: readonly MarkdownTransformer[]) {
 		const parsed = parseSlashCommand(text);
 		const commandEnd = parsed ? parsed.name.length + 1 : text.length;
 		this.commandGraphemes = [...graphemeSegmenter.segment(text.slice(0, commandEnd))].map(({ segment }) => segment);
@@ -28,9 +29,18 @@ class SlashCommandMarkdown implements Component {
 					: COMMAND_MASK_BASE + COMMAND_MASK_EXTRA_WIDTH.repeat(width - 1);
 			})
 			.join("");
-		this.markdown = new Markdown(`${placeholder}${text.slice(commandEnd)}`, 0, 0, markdownTheme, {
-			color: (content: string) => theme.fg("userMessageText", content),
-		});
+		this.markdown = new Markdown(
+			`${placeholder}${text.slice(commandEnd)}`,
+			0,
+			0,
+			markdownTheme,
+			{
+				color: (content: string) => theme.fg("userMessageText", content),
+			},
+			{
+				transform: createMarkdownTransform("user", false, markdownTransformers),
+			},
+		);
 	}
 
 	render(width: number): string[] {
@@ -63,15 +73,25 @@ export class UserMessageComponent extends Container {
 		text: string,
 		markdownTheme: MarkdownTheme = getMarkdownTheme(),
 		isRecognizedSlashCommand: (name: string) => boolean = () => false,
+		markdownTransformers: readonly MarkdownTransformer[] = [],
 	) {
 		super();
 		this.contentBox = new Box(2, 1, (content: string) => theme.getUserMessageBackgroundColor()(content));
 		this.contentBox.addChild(
 			isLeadingSlashCommand(text, isRecognizedSlashCommand)
-				? new SlashCommandMarkdown(text, markdownTheme)
-				: new Markdown(text, 0, 0, markdownTheme, {
-						color: (content: string) => theme.fg("userMessageText", content),
-					}),
+				? new SlashCommandMarkdown(text, markdownTheme, markdownTransformers)
+				: new Markdown(
+						text,
+						0,
+						0,
+						markdownTheme,
+						{
+							color: (content: string) => theme.fg("userMessageText", content),
+						},
+						{
+							transform: createMarkdownTransform("user", false, markdownTransformers),
+						},
+					),
 		);
 		this.addChild(this.contentBox);
 	}

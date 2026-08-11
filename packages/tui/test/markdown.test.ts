@@ -1365,4 +1365,29 @@ bar`,
 			}
 		});
 	});
+
+	describe("transform option", () => {
+		it("receives the width after padding and participates in width-aware caching", () => {
+			const calls: Array<{ markdown: string; width: number }> = [];
+			const markdown = new Markdown("before", 2, 0, defaultMarkdownTheme, undefined, {
+				transform: (source, availableWidth) => {
+					calls.push({ markdown: source, width: availableWidth });
+					return `${source}-${availableWidth}`;
+				},
+			});
+
+			assert.ok(markdown.render(20).join("\n").includes("before-16"));
+			markdown.render(20);
+			assert.deepStrictEqual(calls, [{ markdown: "before", width: 16 }]);
+
+			assert.ok(markdown.render(12).join("\n").includes("before-8"));
+			markdown.setText("after");
+			assert.ok(markdown.render(12).join("\n").includes("after-8"));
+			assert.deepStrictEqual(calls, [
+				{ markdown: "before", width: 16 },
+				{ markdown: "before", width: 8 },
+				{ markdown: "after", width: 8 },
+			]);
+		});
+	});
 });

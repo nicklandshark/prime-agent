@@ -201,6 +201,8 @@ import { FooterComponent } from "./components/footer.js";
 import { HeartbeatManagerComponent } from "./components/heartbeat-manager.js";
 import { InjectedPromptMessageComponent, isInjectedPromptMessage } from "./components/injected-prompt-message.js";
 import { formatKeyText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.js";
+import type { MarkdownTransformer } from "./components/markdown-transform.js";
+import { createMermaidMarkdownTransformer } from "./components/mermaid.js";
 import type { AuthSelectorProvider } from "./components/oauth-selector.js";
 import { PrimeOnboardingSplashComponent } from "./components/prime-onboarding-splash.js";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.js";
@@ -950,6 +952,7 @@ export class InteractiveMode {
 
 	// Thinking block visibility state
 	private hideThinkingBlock = false;
+	private readonly mermaidMarkdownTransformer: MarkdownTransformer;
 
 	// Skill commands: command name -> skill file path
 	private skillCommands = new Map<string, string>();
@@ -1045,6 +1048,10 @@ export class InteractiveMode {
 			throw new Error("InteractiveMode requires uiServices when no localSessionHost is supplied");
 		}
 		this.uiServices = uiServices;
+		this.mermaidMarkdownTransformer = createMermaidMarkdownTransformer({
+			getMode: () => this.settingsManager.getMermaidRenderingMode(),
+			theme,
+		});
 		this.agentConnection = options.agentConnection;
 		this.promptStashStore = options.promptStashStore;
 		this.promptStashSessionId = options.promptStashSessionId;
@@ -1794,6 +1801,10 @@ export class InteractiveMode {
 			...getMarkdownTheme(),
 			codeBlockIndent: this.settingsManager.getCodeBlockIndent(),
 		};
+	}
+
+	private getMarkdownTransformers(): readonly MarkdownTransformer[] {
+		return [this.mermaidMarkdownTransformer];
 	}
 
 	// =========================================================================
@@ -5439,7 +5450,7 @@ export class InteractiveMode {
 			case "message_update":
 				if (event.message.role === "assistant") {
 					this.streamingMessage = event.message;
-					this.ensureAssistantStreamingComponent(event.message).updateContent(this.streamingMessage);
+					this.ensureAssistantStreamingComponent(event.message).updateContent(this.streamingMessage, true);
 
 					for (const content of this.streamingMessage.content) {
 						if (content.type === "toolCall") {
@@ -5467,7 +5478,7 @@ export class InteractiveMode {
 								: `Operation aborted${elapsedSuffix}`;
 						this.streamingMessage.errorMessage = errorMessage;
 					}
-					this.ensureAssistantStreamingComponent(event.message).updateContent(this.streamingMessage);
+					this.ensureAssistantStreamingComponent(event.message).updateContent(this.streamingMessage, false);
 
 					if (this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error") {
 						if (!errorMessage) {
@@ -5553,7 +5564,7 @@ export class InteractiveMode {
 				this.syncWorkingLoader();
 				if (this.streamingComponent) {
 					if (this.streamingMessage) {
-						this.streamingComponent.updateContent(this.streamingMessage);
+						this.streamingComponent.updateContent(this.streamingMessage, false);
 					} else {
 						this.chatContainer.removeChild(this.streamingComponent);
 					}
@@ -5689,6 +5700,7 @@ export class InteractiveMode {
 			this.hiddenThinkingLabel,
 			{
 				expanded: this.toolOutputExpanded,
+				markdownTransformers: this.getMarkdownTransformers(),
 				precededByToolActivity:
 					this.chatContainer.children.at(-1) instanceof ToolExecutionComponent ||
 					this.chatContainer.children.at(-1) instanceof AgentMessageComponent,
@@ -5696,7 +5708,7 @@ export class InteractiveMode {
 		);
 		this.streamingMessage = message;
 		this.chatContainer.addChild(this.streamingComponent);
-		this.streamingComponent.updateContent(this.streamingMessage);
+		this.streamingComponent.updateContent(this.streamingMessage, true);
 	}
 
 	private ensureAssistantStreamingComponent(message: AssistantMessage): AssistantMessageComponent {
@@ -6178,8 +6190,11 @@ export class InteractiveMode {
 			this.chatContainer.addChild(new Spacer(1));
 		}
 		this.chatContainer.addChild(
-			new UserMessageComponent(text, this.getMarkdownThemeWithSettings(), (name) =>
-				this.isRecognizedSlashCommand(name),
+			new UserMessageComponent(
+				text,
+				this.getMarkdownThemeWithSettings(),
+				(name) => this.isRecognizedSlashCommand(name),
+				this.getMarkdownTransformers(),
 			),
 		);
 	}
@@ -6306,6 +6321,7 @@ export class InteractiveMode {
 								skillBlock.userMessage,
 								this.getMarkdownThemeWithSettings(),
 								(name) => this.isRecognizedSlashCommand(name),
+								this.getMarkdownTransformers(),
 							);
 							this.chatContainer.addChild(userComponent);
 						}
@@ -6314,6 +6330,7 @@ export class InteractiveMode {
 							textContent,
 							this.getMarkdownThemeWithSettings(),
 							(name) => this.isRecognizedSlashCommand(name),
+							this.getMarkdownTransformers(),
 						);
 						this.chatContainer.addChild(userComponent);
 					}
@@ -6331,6 +6348,7 @@ export class InteractiveMode {
 					this.hiddenThinkingLabel,
 					{
 						expanded: this.toolOutputExpanded,
+						markdownTransformers: this.getMarkdownTransformers(),
 						precededByToolActivity:
 							this.chatContainer.children.at(-1) instanceof ToolExecutionComponent ||
 							this.chatContainer.children.at(-1) instanceof AgentMessageComponent,
@@ -7251,6 +7269,7 @@ export class InteractiveMode {
 					currentTheme: this.settingsManager.getTheme() || "prime",
 					availableThemes: getAvailableThemes(),
 					hideThinkingBlock: this.hideThinkingBlock,
+					mermaidRenderingMode: this.settingsManager.getMermaidRenderingMode(),
 					treeFilterMode: this.settingsManager.getTreeFilterMode(),
 					showHardwareCursor: this.settingsManager.getShowHardwareCursor(),
 					editorPaddingX: this.settingsManager.getEditorPaddingX(),
@@ -7349,6 +7368,11 @@ export class InteractiveMode {
 						void this.rebuildChatFromMessages().catch((error) => {
 							this.showError(error instanceof Error ? error.message : String(error));
 						});
+					},
+					onMermaidRenderingModeChange: (mode) => {
+						this.settingsManager.setMermaidRenderingMode(mode);
+						this.ui.invalidate();
+						this.ui.requestRender();
 					},
 					onQuietStartupChange: (enabled) => {
 						this.settingsManager.setQuietStartup(enabled);

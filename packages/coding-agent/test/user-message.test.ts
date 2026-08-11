@@ -1,5 +1,6 @@
 import { clearDefaultTerminalColors, setDefaultTerminalColors, visibleWidth } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, test } from "vitest";
+import { createMermaidMarkdownTransformer } from "../src/modes/interactive/components/mermaid.js";
 import { UserMessageComponent } from "../src/modes/interactive/components/user-message.js";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
 
@@ -95,5 +96,24 @@ describe("UserMessageComponent", () => {
 
 		expect(plain.replace(/\s+/g, "")).toContain(`${command}界\uE000`);
 		expect(lines.every((line) => visibleWidth(line) === 8)).toBe(true);
+	});
+
+	test("renders Mermaid in recognized slash-command arguments without losing command styling", () => {
+		initTheme("dark");
+		const transformer = createMermaidMarkdownTransformer({ getMode: () => "streaming", theme });
+		const component = new UserMessageComponent(
+			"/context\n\n```mermaid\nflowchart LR\n A --> B\n```",
+			undefined,
+			(name) => name === "context",
+			[transformer],
+		);
+		const rendered = component
+			.render(80)
+			.join("\n")
+			.replace(/\x1b\[[0-9;]*m|\x1b\]133;[ABC]\x07/g, "");
+
+		expect(rendered).toContain("/context");
+		expect(rendered).toContain("───▶");
+		expect(rendered).not.toContain("```mermaid");
 	});
 });
