@@ -301,6 +301,11 @@ export class InProcessAgentConnection implements AgentConnection {
 			const prompt = this.session.prompt(message, {
 				...(options?.images ? { images: options.images } : {}),
 				...(options?.streamingBehavior ? { streamingBehavior: options.streamingBehavior, resumeIfIdle: true } : {}),
+				...(options?.followUpQueueKey ? { followUpQueueKey: options.followUpQueueKey } : {}),
+				...(options?.followUpQueueKeyLifetime
+					? { followUpQueueKeyLifetime: options.followUpQueueKeyLifetime }
+					: {}),
+				...(options?.internalPrompt ? { internalPrompt: true } : {}),
 				...(options?.queueIfBusy !== undefined ? { queueIfBusy: options.queueIfBusy } : {}),
 				...(options?.source ? { source: options.source } : {}),
 				...(options?.signal ? { signal: options.signal } : {}),
@@ -322,6 +327,9 @@ export class InProcessAgentConnection implements AgentConnection {
 		await this.session.promptAndWait(message, {
 			...(options?.images ? { images: options.images } : {}),
 			...(options?.streamingBehavior ? { streamingBehavior: options.streamingBehavior, resumeIfIdle: true } : {}),
+			...(options?.followUpQueueKey ? { followUpQueueKey: options.followUpQueueKey } : {}),
+			...(options?.followUpQueueKeyLifetime ? { followUpQueueKeyLifetime: options.followUpQueueKeyLifetime } : {}),
+			...(options?.internalPrompt ? { internalPrompt: true } : {}),
 			...(options?.queueIfBusy !== undefined ? { queueIfBusy: options.queueIfBusy } : {}),
 			...(options?.source ? { source: options.source } : {}),
 			...(options?.signal ? { signal: options.signal } : {}),

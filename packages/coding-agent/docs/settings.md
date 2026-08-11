@@ -235,6 +235,8 @@ When multiple sources specify a session directory, precedence is `--session-dir`
 | `markdown.codeBlockIndent` | string | `"  "` | Indentation for code blocks |
 | `markdown.mermaid` | string | `"streaming"` | Mermaid rendering mode: `"off"`, `"final"`, or `"streaming"` |
 
+When a completed, valid Mermaid diagram is wider than the live terminal, Prime queues one session-coalesced automatic follow-up asking the agent to return a narrower version. Transcript replay and later resizes never trigger this hook, and attached clients recognize the replacement turn without retrying it recursively.
+
 ### Resources
 
 These settings define where to load extensions, skills, prompts, and themes from.

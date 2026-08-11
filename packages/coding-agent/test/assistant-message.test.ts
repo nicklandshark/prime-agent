@@ -1,6 +1,6 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import stripAnsi from "strip-ansi";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.js";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
 
@@ -251,5 +251,82 @@ describe("AssistantMessageComponent streaming identity", () => {
 		const final = stripAnsi(component.render(80).join("\n"));
 		expect(final).toContain("final version");
 		expect(final).not.toContain("streaming version");
+	});
+
+	test("reports transform issues only on the first render after streaming becomes final", () => {
+		initTheme("dark");
+		const message = createAssistantMessage([{ type: "text", text: "source" }]);
+		const onIssue = vi.fn();
+		const issue = {
+			type: "mermaid-width-overflow" as const,
+			source: "flowchart LR\n A --> B",
+			renderedWidth: 40,
+			availableWidth: 20,
+		};
+		const component = new AssistantMessageComponent(undefined, false, undefined, "Thinking...", {
+			markdownTransformers: [
+				(_markdown, context) => {
+					context.reportIssue?.(issue);
+					return "rendered";
+				},
+			],
+			onFinalMarkdownTransformIssue: onIssue,
+		});
+
+		component.updateContent(message, true);
+		component.render(80);
+		expect(onIssue).not.toHaveBeenCalled();
+
+		component.updateContent(message, false);
+		component.render(80);
+		expect(onIssue).toHaveBeenCalledOnce();
+		expect(onIssue).toHaveBeenCalledWith(issue);
+
+		component.render(40);
+		component.invalidate();
+		component.render(30);
+		expect(onIssue).toHaveBeenCalledOnce();
+
+		const replayed = new AssistantMessageComponent(message, false, undefined, "Thinking...", {
+			markdownTransformers: [
+				(_markdown, context) => {
+					context.reportIssue?.(issue);
+					return "rendered";
+				},
+			],
+			onFinalMarkdownTransformIssue: onIssue,
+		});
+		replayed.render(20);
+		expect(onIssue).toHaveBeenCalledOnce();
+	});
+
+	test("does not report transform issues for unsuccessful or incomplete responses", () => {
+		initTheme("dark");
+		const onIssue = vi.fn();
+		const issue = {
+			type: "mermaid-width-overflow" as const,
+			source: "flowchart LR\n A --> B",
+			renderedWidth: 40,
+			availableWidth: 20,
+		};
+
+		for (const stopReason of ["error", "aborted", "length", "toolUse"] as const) {
+			const component = new AssistantMessageComponent(undefined, false, undefined, "Thinking...", {
+				markdownTransformers: [
+					(_markdown, context) => {
+						context.reportIssue?.(issue);
+						return "rendered";
+					},
+				],
+				onFinalMarkdownTransformIssue: onIssue,
+			});
+			const streaming = createAssistantMessage([{ type: "text", text: "source" }]);
+			component.updateContent(streaming, true);
+			component.render(80);
+			component.updateContent({ ...streaming, stopReason }, false);
+			component.render(80);
+		}
+
+		expect(onIssue).not.toHaveBeenCalled();
 	});
 });
