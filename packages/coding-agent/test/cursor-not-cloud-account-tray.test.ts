@@ -20,7 +20,7 @@ function source(valueFingerprint: string) {
 	} as const;
 }
 
-function callTray(token: ReturnType<typeof source> | undefined, thinking = "high", fast = true): string {
+function callTray(token: { valueFingerprint: string } | undefined, thinking = "high", fast = true): string {
 	const fakeThis = Object.create(InteractiveMode.prototype);
 	fakeThis.connectionState = {
 		model: { provider: "cursor-not-cloud", name: "Cursor Grok 4.5", reasoning: true },
@@ -65,7 +65,7 @@ describe("Cursor subscription account tray", () => {
 		const tokenB = source("fingerprint-b");
 		manager.observeCredential(jwt("auth-account-b"), tokenB);
 		expect(callTray(tokenB, "medium", false)).toBe("Cursor Grok 4.5 (account-b@example.test) • medium");
-		expect(manager.getDisplayLabel(tokenA)).toBeUndefined();
+		expect(manager.getDisplayLabel(tokenA)).toBe("account-a@example.test");
 
 		manager.invalidate(tokenB);
 		expect(callTray(undefined)).toBe("Cursor Grok 4.5 • high • fast");
@@ -80,5 +80,43 @@ describe("Cursor subscription account tray", () => {
 		const opaque = source("opaque");
 		manager.observeCredential("opaque-access-token", opaque);
 		expect(manager.getDisplayLabel(opaque)).toBe("Cursor subscription");
+	});
+
+	it("updates a runtime credential label asynchronously from bounded GetMe", async () => {
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+			async () =>
+				new Response(JSON.stringify({ email: "runtime@example.test", authId: "runtime-auth" }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				}),
+		);
+		const manager = getCursorNotCloudAccountManager();
+		const runtime = { ...source("runtime-fingerprint"), source: "runtime" as const };
+		manager.observeCredential("opaque-runtime-token", runtime);
+		expect(callTray(runtime)).toBe("Cursor Grok 4.5 (Cursor subscription) • high • fast");
+		await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalled());
+		await vi.waitFor(() => expect(callTray(runtime)).toBe("Cursor Grok 4.5 (runtime@example.test) • high • fast"));
+	});
+
+	it("does not let an invalidated pending identity repopulate its fingerprint", async () => {
+		let resolveIdentity!: (response: Response) => void;
+		vi.spyOn(globalThis, "fetch").mockReturnValue(
+			new Promise((resolve) => {
+				resolveIdentity = resolve;
+			}),
+		);
+		const manager = getCursorNotCloudAccountManager();
+		const runtime = source("invalidated-pending");
+		manager.observeCredential("opaque-runtime-token", runtime);
+		manager.invalidate(runtime);
+		resolveIdentity(
+			new Response(JSON.stringify({ email: "stale@example.test" }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			}),
+		);
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(manager.getDisplayLabel(runtime)).toBe("Cursor subscription");
 	});
 });

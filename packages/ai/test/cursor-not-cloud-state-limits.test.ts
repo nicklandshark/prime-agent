@@ -6,6 +6,7 @@ import {
 	KvServerMessageSchema,
 	SetBlobArgsSchema,
 } from "../src/providers/cursor-not-cloud/agent_pb.js";
+import { normalizeCursorOrigin } from "../src/providers/cursor-not-cloud/config.js";
 import {
 	CursorBlobCapacityError,
 	CursorConversationStateStore,
@@ -148,5 +149,26 @@ describe("Cursor bounded conversation state", () => {
 		const isolated = store.acquire(keyB);
 		isolated.release();
 		lease.release();
+	});
+
+	it("canonicalizes trusted origins and rejects ambiguous or untrusted base URLs", () => {
+		expect(normalizeCursorOrigin("https://API2.Cursor.SH:443/")).toBe("https://api2.cursor.sh");
+		expect(normalizeCursorOrigin("http://127.0.0.1:8080/")).toBe("http://127.0.0.1:8080");
+		for (const bad of [
+			"http://api2.cursor.sh",
+			"https://user:pass@api2.cursor.sh",
+			"https://api2.cursor.sh/path",
+			"https://api2.cursor.sh/?query=1",
+			"https://api2.cursor.sh/#fragment",
+		])
+			expect(() => normalizeCursorOrigin(bad)).toThrow();
+	});
+
+	it("length-prefixes state tuple components so colon-shaped namespaces cannot collide", () => {
+		const left = createCursorConversationStateKey("credential", "https://api2.cursor.sh", "a:b");
+		const right = createCursorConversationStateKey("credential", "https://api2.cursor.sh", "b:a");
+		const canonical = createCursorConversationStateKey("credential", "https://API2.Cursor.SH:443/", "a:b");
+		expect(left).not.toBe(right);
+		expect(left).toBe(canonical);
 	});
 });

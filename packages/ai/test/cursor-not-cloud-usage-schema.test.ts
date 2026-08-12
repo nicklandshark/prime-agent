@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { create } from "@bufbuild/protobuf";
 import { describe, expect, it } from "vitest";
 import { getModel } from "../src/index.js";
@@ -29,7 +31,7 @@ function emptyUsage(): Usage {
 }
 
 describe("cursor-not-cloud current schema and usage", () => {
-	it("pins the schema-matched terminal, checkpoint, server, request, update, and query fields", () => {
+	it("keeps the exact OMP v17.2.15 schema plus only the five independent terminal counters", () => {
 		expect(TurnEndedUpdateSchema.fields.map((field) => [field.number, field.name])).toEqual([
 			[1, "input_tokens"],
 			[2, "output_tokens"],
@@ -37,17 +39,27 @@ describe("cursor-not-cloud current schema and usage", () => {
 			[4, "cache_write_tokens"],
 			[5, "reasoning_tokens"],
 		]);
-		expect(ConversationTokenDetailsSchema.fields.map((field) => field.number)).toEqual([1, 2, 3, 4, 5]);
-		expect(
-			AgentServerMessageSchema.fields.some((field) => field.number === 8 && field.name === "ttft_breakdown"),
-		).toBe(true);
-		expect(AgentRunRequestSchema.fields.at(-1)?.number).toBe(28);
-		expect(InteractionUpdateSchema.fields.slice(-7).map((field) => field.number)).toEqual([
-			18, 19, 20, 21, 22, 23, 24,
-		]);
-		expect(InteractionQuerySchema.fields.filter((field) => field.number >= 9).map((field) => field.number)).toEqual([
-			9, 10, 11, 12, 13, 14,
-		]);
+		expect(ConversationTokenDetailsSchema.fields.map((field) => field.number)).toEqual([1, 2]);
+		expect(AgentServerMessageSchema.fields.map((field) => field.number)).toEqual([1, 2, 5, 3, 4, 7]);
+		expect(AgentRunRequestSchema.fields.at(-1)?.number).toBe(8);
+		expect(InteractionUpdateSchema.fields.at(-1)?.number).toBe(17);
+		expect(InteractionQuerySchema.fields.map((field) => field.number)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+
+		const proto = readFileSync(new URL("../src/providers/cursor-not-cloud/agent.proto", import.meta.url), "utf8");
+		const extension = `// Independently specified wire extension used by this provider. These five
+// scalar counters are factual terminal field declarations observed by the
+// project; no other declaration in this file is copied from Cursor software.
+message TurnEndedUpdate {
+   optional int64 input_tokens = 1;
+   optional int64 output_tokens = 2;
+   optional int64 cache_read_tokens = 3;
+   optional int64 cache_write_tokens = 4;
+   optional int64 reasoning_tokens = 5;
+}`;
+		const exactOmpBaseline = proto.replace(extension, "message TurnEndedUpdate {\n}");
+		expect(createHash("sha256").update(exactOmpBaseline).digest("hex")).toBe(
+			"aa6d1715e8ba8309c9049d3d1d9acbea75454f852a82ff22292843c1010ae527",
+		);
 	});
 
 	it("uses terminal counters authoritatively while retaining occupied context independently", () => {
@@ -69,8 +81,8 @@ describe("cursor-not-cloud current schema and usage", () => {
 					inputTokens: 11161n,
 					outputTokens: 23n,
 					cacheReadTokens: 0n,
-					cacheWriteTokens: 0n,
-					reasoningTokens: 0n,
+					cacheWriteTokens: 5n,
+					reasoningTokens: 7n,
 				}),
 			},
 		});
@@ -86,7 +98,9 @@ describe("cursor-not-cloud current schema and usage", () => {
 			output: 23,
 			contextTokens: 11184,
 			contextMaxTokens: 256000,
-			totalTokens: 11184,
+			cacheWrite: 5,
+			reasoning: 7,
+			totalTokens: 11189,
 		});
 		const model = getModel("cursor-not-cloud", "cursor-grok-4.5-high");
 		if (!model) throw new Error("model missing");

@@ -10,8 +10,9 @@ import { streamCursor } from "../src/providers/cursor-not-cloud/index.js";
 import type { Context, Model } from "../src/types.js";
 
 let server: http2.Http2Server | undefined;
-function frame(body: Uint8Array): Buffer {
+function frame(body: Uint8Array, flags = 0): Buffer {
 	const result = Buffer.alloc(5 + body.length);
+	result[0] = flags;
 	result.writeUInt32BE(body.length, 1);
 	result.set(body, 5);
 	return result;
@@ -58,7 +59,7 @@ describe("cursor-not-cloud environment auth fallback", () => {
 					}),
 				},
 			});
-			stream.end(frame(toBinary(AgentServerMessageSchema, ended)));
+			stream.end(Buffer.concat([frame(toBinary(AgentServerMessageSchema, ended)), frame(Buffer.from("{}"), 2)]));
 		});
 		await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
 		const address = server.address();

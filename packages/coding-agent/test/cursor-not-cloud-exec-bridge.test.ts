@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -339,4 +340,53 @@ describe("Cursor Agent exec bridge", () => {
 		expect(existsSync(join(cwd, "link.txt"))).toBe(false);
 		expect(existsSync(target)).toBe(true);
 	});
+
+	it.skipIf(process.platform !== "linux")(
+		"contains an adversarial parent symlink swap with held no-follow fds",
+		async () => {
+			const parent = mkdtempSync(join(tmpdir(), "cursor-delete-swap-"));
+			tempDirs.push(parent);
+			const cwd = join(parent, "workspace");
+			const outside = join(parent, "outside");
+			const pivot = join(cwd, "pivot");
+			const other = join(cwd, "other");
+			mkdirSync(cwd);
+			mkdirSync(outside);
+			mkdirSync(pivot);
+			symlinkSync(outside, other);
+			for (let i = 0; i < 50; i++) {
+				writeFileSync(join(pivot, `victim-${i}`), "inside");
+				writeFileSync(join(outside, `victim-${i}`), "outside");
+			}
+			const script = `
+			const fs = require("node:fs");
+			const [pivot, other] = process.argv.slice(1);
+			process.stdout.write("ready\\n");
+			const end = Date.now() + 500;
+			while (Date.now() < end) {
+				try { fs.renameSync(pivot, pivot + ".swap"); fs.renameSync(other, pivot); fs.renameSync(pivot + ".swap", other); } catch {}
+			}
+		`;
+			const swapper = spawn(process.execPath, ["-e", script, pivot, other], { stdio: ["ignore", "pipe", "ignore"] });
+			await new Promise<void>((resolve, reject) => {
+				swapper.once("error", reject);
+				swapper.once("exit", (code) => reject(new Error(`swapper exited before ready: ${code}`)));
+				swapper.stdout.once("data", () => resolve());
+			});
+			try {
+				const tool = createCursorDeleteTool(cwd);
+				for (let i = 0; i < 50; i++) {
+					await tool.execute(`swap-${i}`, { path: `pivot/victim-${i}` }).catch(() => undefined);
+				}
+			} finally {
+				const exited = new Promise<void>((resolve) => {
+					if (swapper.exitCode !== null || swapper.signalCode !== null) resolve();
+					else swapper.once("exit", () => resolve());
+				});
+				swapper.kill("SIGKILL");
+				await exited;
+			}
+			for (let i = 0; i < 50; i++) expect(existsSync(join(outside, `victim-${i}`))).toBe(true);
+		},
+	);
 });

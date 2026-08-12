@@ -37,9 +37,16 @@ const CONNECT_END_STREAM_FLAG = 0b00000010;
 
 type Scenario =
 	| { kind: "success" }
+	| { kind: "missing-end-after-turn" }
+	| { kind: "duplicate-end" }
+	| { kind: "end-envelope-before-turn" }
+	| { kind: "malformed-end" }
 	| { kind: "http-error" }
+	| { kind: "http-error-with-exec" }
+	| { kind: "wrong-content-with-exec" }
 	| { kind: "connect-error-after-turn" }
 	| { kind: "grpc-trailer-after-turn" }
+	| { kind: "malformed-grpc-trailer" }
 	| { kind: "end-before-turn" }
 	| { kind: "hang-after-turn" }
 	| { kind: "exec-in-final-chunk"; responseFinished: TestPromiseWithResolvers<void> }
@@ -97,6 +104,10 @@ function turnEndedFrame(): Buffer {
 function connectEndErrorFrame(code: string, message: string): Buffer {
 	const payload = Buffer.from(JSON.stringify({ error: { code, message } }), "utf8");
 	return frameConnectMessage(payload, CONNECT_END_STREAM_FLAG);
+}
+
+function connectEndFrame(): Buffer {
+	return frameConnectMessage(Buffer.from("{}", "utf8"), CONNECT_END_STREAM_FLAG);
 }
 
 /**
@@ -176,13 +187,19 @@ async function startServer(): Promise<string> {
 			return;
 		}
 
-		if (scenario.kind === "http-error") {
+		if (scenario.kind === "http-error" || scenario.kind === "http-error-with-exec") {
 			stream.respond({ ":status": 401, "content-type": "application/connect+proto" });
+			if (scenario.kind === "http-error-with-exec") stream.write(execRequestFrame());
 			stream.end();
 			return;
 		}
+		if (scenario.kind === "wrong-content-with-exec") {
+			stream.respond({ ":status": 200, "content-type": "text/plain" });
+			stream.end(execRequestFrame());
+			return;
+		}
 
-		if (scenario.kind === "grpc-trailer-after-turn") {
+		if (scenario.kind === "grpc-trailer-after-turn" || scenario.kind === "malformed-grpc-trailer") {
 			stream.respond(
 				{
 					":status": 200,
@@ -193,11 +210,13 @@ async function startServer(): Promise<string> {
 			stream.on("wantTrailers", () => {
 				stream.sendTrailers({
 					"grpc-status": "13",
-					"grpc-message": encodeURIComponent("post-turn trailer failure"),
+					"grpc-message":
+						scenario.kind === "malformed-grpc-trailer" ? "%" : encodeURIComponent("post-turn trailer failure"),
 				});
 			});
 			stream.write(textDeltaFrame("hello"));
 			stream.write(turnEndedFrame());
+			stream.write(connectEndFrame());
 			stream.end();
 			return;
 		}
@@ -206,6 +225,23 @@ async function startServer(): Promise<string> {
 			":status": 200,
 			"content-type": "application/connect+proto",
 		});
+
+		if (scenario.kind === "missing-end-after-turn") {
+			stream.end(Buffer.concat([textDeltaFrame("hello"), turnEndedFrame()]));
+			return;
+		}
+		if (scenario.kind === "duplicate-end") {
+			stream.end(Buffer.concat([turnEndedFrame(), connectEndFrame(), connectEndFrame()]));
+			return;
+		}
+		if (scenario.kind === "end-envelope-before-turn") {
+			stream.end(connectEndFrame());
+			return;
+		}
+		if (scenario.kind === "malformed-end") {
+			stream.end(Buffer.concat([turnEndedFrame(), frameConnectMessage(Buffer.from("[]"), CONNECT_END_STREAM_FLAG)]));
+			return;
+		}
 
 		if (scenario.kind === "end-before-turn") {
 			stream.write(textDeltaFrame("partial"));
@@ -229,6 +265,7 @@ async function startServer(): Promise<string> {
 			// never guesses at timing.
 			stream.on("finish", () => responseFinished.resolve());
 			stream.write(execAndTurnEndedFrame());
+			stream.write(connectEndFrame());
 			stream.end();
 			return;
 		}
@@ -281,7 +318,6 @@ async function startServer(): Promise<string> {
 
 		if (scenario.kind === "connect-error-after-turn") {
 			stream.write(connectEndErrorFrame("unavailable", "post-turn connect failure"));
-			stream.end();
 			return;
 		}
 
@@ -289,6 +325,7 @@ async function startServer(): Promise<string> {
 			return;
 		}
 
+		stream.write(connectEndFrame());
 		stream.end();
 	});
 
@@ -305,12 +342,17 @@ async function startServer(): Promise<string> {
 
 function makeModel(baseUrl: string): Model<"cursor-not-cloud"> {
 	return {
-		id: "cursor-terminal-fixture",
-		name: "Cursor terminal fixture",
+		id: "cursor-grok-4.5-high",
+		name: "Cursor Grok 4.5",
 		api: "cursor-not-cloud",
 		provider: "cursor-not-cloud",
 		baseUrl,
-		reasoning: false,
+		reasoning: true,
+		thinkingLevelMap: {
+			low: "cursor-grok-4.5-low",
+			medium: "cursor-grok-4.5-medium",
+			high: "cursor-grok-4.5-high",
+		},
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 1,
@@ -328,7 +370,7 @@ async function collectStream(
 ) {
 	const stream = streamCursor(model, context, {
 		apiKey: "test-token",
-		discoveredModelIds: new Set(["cursor-terminal-fixture"]),
+		discoveredModelIds: new Set(["cursor-grok-4.5-high"]),
 		signal: options?.signal,
 		timeoutMs: options?.timeoutMs,
 		onToolResult: options?.onToolResult,
@@ -375,6 +417,44 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(result.errorMessage).toBeUndefined();
 	});
 
+	it.each([
+		["missing-end-after-turn", /before the Connect end envelope/i],
+		["duplicate-end", /duplicate Connect end envelopes/i],
+		["end-envelope-before-turn", /before turnEnded/i],
+		["malformed-end", /invalid shape/i],
+	] as const)("rejects strict terminal ordering: %s", async (kind, message) => {
+		scenario = { kind };
+		const baseUrl = await startServer();
+		const { eventTypes, result } = await collectStream(makeModel(baseUrl));
+		expect(eventTypes.at(-1)).toBe("error");
+		expect(eventTypes).not.toContain("done");
+		expect(result.errorMessage).toMatch(message);
+	});
+
+	it.each(["http-error-with-exec", "wrong-content-with-exec"] as const)(
+		"never dispatches server messages from rejected response %s",
+		async (kind) => {
+			scenario = { kind };
+			const baseUrl = await startServer();
+			let calls = 0;
+			const stream = streamCursor(makeModel(baseUrl), context, {
+				apiKey: "test-token",
+				discoveredModelIds: new Set(["cursor-grok-4.5-high"]),
+				execHandlers: {
+					async read() {
+						calls++;
+						throw new Error("must not run");
+					},
+				},
+			});
+			for await (const _event of stream) {
+				/* drain */
+			}
+			expect((await stream.result()).stopReason).toBe("error");
+			expect(calls).toBe(0);
+		},
+	);
+
 	it("surfaces non-success HTTP status instead of reporting a silent stream end", async () => {
 		scenario = { kind: "http-error" };
 		const baseUrl = await startServer();
@@ -382,7 +462,7 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(eventTypes.at(-1)).toBe("error");
 		expect(eventTypes).not.toContain("done");
 		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toContain("Cursor run failed with HTTP 401");
+		expect(result.errorMessage).toContain("Provider authentication failed");
 	});
 
 	it("surfaces CONNECT end-stream errors that arrive after turnEnded", async () => {
@@ -405,6 +485,13 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(eventTypes).not.toContain("done");
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("gRPC error 13: post-turn trailer failure");
+	});
+
+	it("safely renders malformed percent escapes in gRPC messages", async () => {
+		scenario = { kind: "malformed-grpc-trailer" };
+		const baseUrl = await startServer();
+		const { result } = await collectStream(makeModel(baseUrl));
+		expect(result.errorMessage).toContain("gRPC error 13: %");
 	});
 
 	it("rejects when the stream ends before turnEnded", async () => {
@@ -455,7 +542,7 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		const controller = new AbortController();
 		const stream = streamCursor(makeModel(baseUrl), context, {
 			apiKey: "test-token",
-			discoveredModelIds: new Set(["cursor-terminal-fixture"]),
+			discoveredModelIds: new Set(["cursor-grok-4.5-high"]),
 			signal: controller.signal,
 		});
 		const eventTypes: string[] = [];
@@ -490,7 +577,7 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		const handlerDone = testPromiseWithResolvers<void>();
 		const stream = streamCursor(makeModel(baseUrl), context, {
 			apiKey: "test-token",
-			discoveredModelIds: new Set(["cursor-terminal-fixture"]),
+			discoveredModelIds: new Set(["cursor-grok-4.5-high"]),
 			execHandlers: {
 				async read() {
 					handlerStarted.resolve();
@@ -541,31 +628,27 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(paired).toEqual(["call-final"]);
 	});
 
-	it("waits for an in-flight exec handler before emitting the transport error", async () => {
-		// Same race as above, but the turn DIES instead of ending: the exec request
-		// and the transport failure arrive in one chunk. The Agent finalizes the
-		// synthesized call from the terminal error and clears its Cursor result
-		// buffer, so a handler still running would land its real result after
-		// `agent_end` and have it discarded — even though the tool may already
-		// have performed side effects. The error must not be pushed first.
+	it("cancels an in-flight exec handler when the transport dies", async () => {
 		const responseFinished = testPromiseWithResolvers<void>();
 		scenario = { kind: "exec-then-transport-error", responseFinished };
 		const baseUrl = await startServer();
 		const paired: string[] = [];
 		const handlerStarted = testPromiseWithResolvers<void>();
 		const handlerDone = testPromiseWithResolvers<void>();
+		let handlerSignal: AbortSignal | undefined;
 		const stream = streamCursor(makeModel(baseUrl), context, {
 			apiKey: "test-token",
-			discoveredModelIds: new Set(["cursor-terminal-fixture"]),
+			discoveredModelIds: new Set(["cursor-grok-4.5-high"]),
 			execHandlers: {
-				async read() {
+				async read(_args, execContext) {
+					handlerSignal = execContext?.signal;
 					handlerStarted.resolve();
 					await handlerDone.promise;
 					return {
 						role: "toolResult",
 						toolCallId: "call-final",
 						toolName: "read",
-						content: [{ type: "text", text: "file body" }],
+						content: [{ type: "text", text: "late result" }],
 						isError: false,
 						timestamp: 1,
 					};
@@ -577,31 +660,154 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 			},
 		});
 
-		const gate = (async () => {
-			await Promise.all([handlerStarted.promise, responseFinished.promise]);
-			await new Promise((resolve) => setTimeout(resolve, 0));
-			try {
-				expect(stream.resultSettled).toBe(false);
-				expect(paired).toEqual([]);
-			} finally {
-				handlerDone.resolve();
-			}
-		})();
-
+		await Promise.all([handlerStarted.promise, responseFinished.promise]);
 		const eventTypes: string[] = [];
-		for await (const event of stream) {
-			// The handler's result must already exist by the time the terminal
-			// error is observed — that is the event the Agent drains on.
-			if (event.type === "error") expect(paired).toEqual(["call-final"]);
-			eventTypes.push(event.type);
-		}
-		await gate;
+		for await (const event of stream) eventTypes.push(event.type);
 		const result = await stream.result();
-
+		expect(handlerSignal?.aborted).toBe(true);
 		expect(eventTypes.at(-1)).toBe("error");
-		expect(eventTypes).not.toContain("done");
 		expect(result.errorMessage).toContain("mid-exec transport failure");
 		expect(paired).toEqual(["call-final"]);
+		handlerDone.resolve();
+	});
+
+	it.each([
+		[
+			"sync throw",
+			() => {
+				throw new Error("sink sync failure");
+			},
+		],
+		[
+			"promise rejection",
+			async () => {
+				throw new Error("sink async failure");
+			},
+		],
+	] as const)("fails a clean turn once when onToolResult has a %s", async (_name, sink) => {
+		const responseFinished = testPromiseWithResolvers<void>();
+		scenario = { kind: "exec-in-final-chunk", responseFinished };
+		const baseUrl = await startServer();
+		let sinkCalls = 0;
+		const stream = streamCursor(makeModel(baseUrl), context, {
+			apiKey: "test-token",
+			discoveredModelIds: new Set(["cursor-grok-4.5-high"]),
+			execHandlers: {
+				async read() {
+					return {
+						role: "toolResult",
+						toolCallId: "call-final",
+						toolName: "read",
+						content: [{ type: "text", text: "ok" }],
+						isError: false,
+						timestamp: 1,
+					};
+				},
+			},
+			onToolResult: (result) => {
+				sinkCalls++;
+				return Promise.resolve()
+					.then(sink)
+					.then(() => result);
+			},
+		});
+		const events: string[] = [];
+		for await (const event of stream) events.push(event.type);
+		expect((await stream.result()).stopReason).toBe("error");
+		expect(events.filter((type) => type === "error")).toHaveLength(1);
+		expect(sinkCalls).toBe(1);
+	});
+
+	it("bounds a never-resolving onToolResult on an otherwise successful turn", async () => {
+		const responseFinished = testPromiseWithResolvers<void>();
+		scenario = { kind: "exec-in-final-chunk", responseFinished };
+		const baseUrl = await startServer();
+		let sinkCalls = 0;
+		const stream = streamCursor(makeModel(baseUrl), context, {
+			apiKey: "test-token",
+			timeoutMs: 20,
+			discoveredModelIds: new Set(["cursor-grok-4.5-high"]),
+			execHandlers: {
+				async read() {
+					return {
+						role: "toolResult",
+						toolCallId: "call-final",
+						toolName: "read",
+						content: [{ type: "text", text: "ok" }],
+						isError: false,
+						timestamp: 1,
+					};
+				},
+			},
+			onToolResult: () => {
+				sinkCalls++;
+				return new Promise<never>(() => {});
+			},
+		});
+		const events: string[] = [];
+		for await (const event of stream) events.push(event.type);
+		const result = await stream.result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toMatch(/timeout/i);
+		expect(events.filter((type) => type === "error")).toHaveLength(1);
+		expect(sinkCalls).toBe(1);
+	});
+
+	it.each([
+		[
+			"sync throw",
+			() => {
+				throw new Error("sink transport sync failure");
+			},
+		],
+		[
+			"promise rejection",
+			async () => {
+				throw new Error("sink transport async failure");
+			},
+		],
+	] as const)("does not invoke a failing %s sink twice during transport cleanup", async (_name, sink) => {
+		scenario = { kind: "todo-start-then-death" };
+		const baseUrl = await startServer();
+		let sinkCalls = 0;
+		const { eventTypes, result } = await collectStream(makeModel(baseUrl), {
+			onToolResult: (toolResult) => {
+				sinkCalls++;
+				return Promise.resolve()
+					.then(sink)
+					.then(() => toolResult);
+			},
+		});
+		expect(result.stopReason).toBe("error");
+		expect(eventTypes.filter((type) => type === "error")).toHaveLength(1);
+		expect(sinkCalls).toBe(1);
+	});
+
+	it("emits exactly one timeout error for a never-resolving exec without a caller signal", async () => {
+		scenario = { kind: "exec-then-hang" };
+		const baseUrl = await startServer();
+		const started = testPromiseWithResolvers<void>();
+		let execSignal: AbortSignal | undefined;
+		const stream = streamCursor(makeModel(baseUrl), context, {
+			apiKey: "test-token",
+			discoveredModelIds: new Set(["cursor-grok-4.5-high"]),
+			timeoutMs: 20,
+			execHandlers: {
+				async read(_args, execContext) {
+					execSignal = execContext?.signal;
+					started.resolve();
+					return await new Promise<never>(() => {});
+				},
+			},
+		});
+		await started.promise;
+		const eventTypes: string[] = [];
+		for await (const event of stream) eventTypes.push(event.type);
+		const result = await stream.result();
+		expect(eventTypes.filter((type) => type === "error")).toHaveLength(1);
+		expect(eventTypes).not.toContain("done");
+		expect(result.errorMessage).toMatch(/timeout/i);
+		expect(execSignal?.aborted).toBe(true);
 	});
 
 	it("does not hold the abort hostage to a hung exec handler", async () => {
@@ -619,7 +825,7 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		const handlerDone = testPromiseWithResolvers<void>();
 		const stream = streamCursor(makeModel(baseUrl), context, {
 			apiKey: "test-token",
-			discoveredModelIds: new Set(["cursor-terminal-fixture"]),
+			discoveredModelIds: new Set(["cursor-grok-4.5-high"]),
 			signal: controller.signal,
 			execHandlers: {
 				async read() {

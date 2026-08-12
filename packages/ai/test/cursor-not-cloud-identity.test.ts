@@ -29,7 +29,9 @@ describe("Cursor GetMe identity", () => {
 	});
 
 	it("accepts a valid unidentified response for safe fallbacks", async () => {
-		const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+		const fetchMock = vi.fn(
+			async () => new Response("{}", { status: 200, headers: { "content-type": "application/json" } }),
+		);
 		await expect(fetchCursorAccountIdentity(token, { fetch: fetchMock as typeof fetch })).resolves.toEqual({});
 	});
 
@@ -37,7 +39,13 @@ describe("Cursor GetMe identity", () => {
 		["malformed", async () => new Response("not-json", { status: 200 }), "decode", undefined],
 		["unauthorized", async () => new Response("private body", { status: 401 }), "http", 401],
 		["forbidden", async () => new Response("private body", { status: 403 }), "http", 403],
-		["oversized", async () => new Response("x".repeat(64 * 1024 + 1), { status: 200 }), "oversized", undefined],
+		[
+			"oversized",
+			async () =>
+				new Response("x".repeat(64 * 1024 + 1), { status: 200, headers: { "content-type": "application/json" } }),
+			"oversized",
+			undefined,
+		],
 	] as const)("sanitizes %s failures", async (_name, mock, kind, status) => {
 		let error: unknown;
 		try {
@@ -67,5 +75,32 @@ describe("Cursor GetMe identity", () => {
 		const pending = fetchCursorAccountIdentity(token, { fetch: hanging as typeof fetch, signal: controller.signal });
 		controller.abort();
 		await expect(pending).rejects.toMatchObject({ kind: "abort" });
+	});
+
+	it("cancels a chunked infinite body as soon as the 64 KiB bound is crossed", async () => {
+		let bytesRead = 0;
+		let cancelled = false;
+		const body = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				const chunk = new Uint8Array(1024);
+				bytesRead += chunk.byteLength;
+				controller.enqueue(chunk);
+			},
+			cancel() {
+				cancelled = true;
+			},
+		});
+		const fetchMock = vi.fn(
+			async () =>
+				new Response(body, {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				}),
+		);
+		await expect(fetchCursorAccountIdentity(token, { fetch: fetchMock as typeof fetch })).rejects.toMatchObject({
+			kind: "oversized",
+		});
+		expect(cancelled).toBe(true);
+		expect(bytesRead).toBeLessThanOrEqual(66 * 1024);
 	});
 });

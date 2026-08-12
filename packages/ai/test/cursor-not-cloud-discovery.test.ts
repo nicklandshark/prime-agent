@@ -96,6 +96,31 @@ describe("cursor-not-cloud discovery", () => {
 		["wrong content type", { contentType: "text/plain", body: catalog() }, "content-type"],
 		["malformed protobuf", { body: new Uint8Array([0xff]) }, "decode"],
 		["compressed Connect", { contentType: "application/connect+proto", body: frame(catalog(), 1) }, "compressed"],
+		["missing Connect end", { contentType: "application/connect+proto", body: frame(catalog()) }, "truncated"],
+		[
+			"duplicate Connect end",
+			{
+				contentType: "application/connect+proto",
+				body: Buffer.concat([frame(catalog()), frame(Buffer.from("{}"), 2), frame(Buffer.from("{}"), 2)]),
+			},
+			"decode",
+		],
+		[
+			"out-of-order Connect end",
+			{
+				contentType: "application/connect+proto",
+				body: Buffer.concat([frame(Buffer.from("{}"), 2), frame(catalog())]),
+			},
+			"decode",
+		],
+		[
+			"malformed Connect end shape",
+			{
+				contentType: "application/connect+proto",
+				body: Buffer.concat([frame(catalog()), frame(Buffer.from("[]"), 2)]),
+			},
+			"decode",
+		],
 		[
 			"truncated Connect",
 			{ contentType: "application/connect+proto", body: new Uint8Array([0, 0, 0, 0, 4, 1]) },
@@ -136,6 +161,28 @@ describe("cursor-not-cloud discovery", () => {
 		await expect(
 			getCursorAgentModelCatalog("fixture-d2", { baseUrl, now: 1 + CURSOR_DISCOVERY_FRESH_TTL_MS + 1 }),
 		).rejects.toBeInstanceOf(CursorDiscoveryError);
+	});
+
+	it.each([408, 425, 429, 500, 503])("uses stale LKG for transient HTTP %i but never 401/403", async (status) => {
+		const baseUrl = await startServer();
+		const token = `fixture-transient-${status}`;
+		reply = { body: catalog("cursor-grok-4.5-high") };
+		await getCursorAgentModelCatalog(token, { baseUrl, now: 1 });
+		reply = { status };
+		await expect(
+			getCursorAgentModelCatalog(token, { baseUrl, now: 1 + CURSOR_DISCOVERY_FRESH_TTL_MS + 1 }),
+		).resolves.toMatchObject({ stale: true });
+	});
+
+	it.each([401, 403])("does not use stale LKG for auth HTTP %i", async (status) => {
+		const baseUrl = await startServer();
+		const token = `fixture-auth-${status}`;
+		reply = { body: catalog("cursor-grok-4.5-high") };
+		await getCursorAgentModelCatalog(token, { baseUrl, now: 1 });
+		reply = { status };
+		await expect(
+			getCursorAgentModelCatalog(token, { baseUrl, now: 1 + CURSOR_DISCOVERY_FRESH_TTL_MS + 1 }),
+		).rejects.toMatchObject({ status });
 	});
 
 	it("replaces old entitlement with a successful empty catalog", async () => {

@@ -2404,4 +2404,131 @@ describe("Cursor exec hook abort", () => {
 		);
 		expect(cases).toContain("readMcpResourceExecResult");
 	});
+
+	describe("bounded exactly-once exec correlation", () => {
+		async function dispatchWithRegistry(
+			message: ExecServerMessage,
+			handler: NonNullable<CursorExecHandlers["read"]>,
+			registry: Map<number, Promise<void>>,
+			written: Buffer[],
+		): Promise<void> {
+			const output = cursorAssistantMessage();
+			const stream = new AssistantMessageEventStream();
+			const request = {
+				write(chunk: Buffer) {
+					written.push(chunk);
+					return true;
+				},
+				closed: false,
+				destroyed: false,
+				writableLength: 0,
+			} as unknown as Parameters<typeof handleServerMessage>[5];
+			await handleServerMessage(
+				create(AgentServerMessageSchema, { message: { case: "execServerMessage", value: message } }),
+				output,
+				stream,
+				newBlockState(),
+				new Map(),
+				request,
+				{ read: handler },
+				undefined,
+				{ sawTokenDelta: false },
+				[],
+				undefined,
+				new Map(),
+				undefined,
+				registry,
+			);
+		}
+
+		it("joins concurrent duplicate ids without invoking the read side effect twice", async () => {
+			let calls = 0;
+			const gate = deferred();
+			const registry = new Map<number, Promise<void>>();
+			const written: Buffer[] = [];
+			const message = buildExecMessage({
+				case: "readArgs",
+				value: create(ReadArgsSchema, { path: "x", toolCallId: "dup" }),
+			});
+			const handler: NonNullable<CursorExecHandlers["read"]> = async () => {
+				calls++;
+				await gate.started;
+				return toolResult("contents", { toolCallId: "dup", toolName: "read" });
+			};
+			const first = dispatchWithRegistry(message, handler, registry, written);
+			await Promise.resolve();
+			const duplicate = dispatchWithRegistry(message, handler, registry, written);
+			gate.markStarted();
+			await Promise.all([first, duplicate]);
+			expect(calls).toBe(1);
+			expect(written).toHaveLength(1);
+		});
+
+		it("retains completed ids to terminal and does not replay a side effect", async () => {
+			let calls = 0;
+			const registry = new Map<number, Promise<void>>();
+			const written: Buffer[] = [];
+			const message = buildExecMessage({
+				case: "readArgs",
+				value: create(ReadArgsSchema, { path: "x", toolCallId: "dup-done" }),
+			});
+			const handler: NonNullable<CursorExecHandlers["read"]> = async () => {
+				calls++;
+				return toolResult("contents", { toolCallId: "dup-done", toolName: "read" });
+			};
+			await dispatchWithRegistry(message, handler, registry, written);
+			await dispatchWithRegistry(message, handler, registry, written);
+			expect(calls).toBe(1);
+			expect(written).toHaveLength(1);
+		});
+	});
+
+	it("rejects an oversized tool reply without emitting it or repeating the handler", async () => {
+		let calls = 0;
+		const registry = new Map<number, Promise<void>>();
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const written: Buffer[] = [];
+		const request = {
+			write(chunk: Buffer) {
+				written.push(chunk);
+				return true;
+			},
+			closed: false,
+			destroyed: false,
+			writableLength: 0,
+		} as unknown as Parameters<typeof handleServerMessage>[5];
+		const message = buildExecMessage({
+			case: "readArgs",
+			value: create(ReadArgsSchema, { path: "huge", toolCallId: "huge" }),
+		});
+		await handleServerMessage(
+			create(AgentServerMessageSchema, { message: { case: "execServerMessage", value: message } }),
+			output,
+			stream,
+			newBlockState(),
+			new Map(),
+			request,
+			{
+				read: async () => {
+					calls++;
+					return toolResult("x".repeat(32 * 1024 * 1024 + 1), { toolCallId: "huge", toolName: "read" });
+				},
+			},
+			undefined,
+			{ sawTokenDelta: false },
+			[],
+			undefined,
+			new Map(),
+			undefined,
+			registry,
+		).catch(() => {});
+		expect(calls).toBe(1);
+		// No oversized result frame reached write; only bounded fallback/control frames are allowed.
+		expect(written.length).toBeGreaterThan(0);
+		expect(written.every((frame) => frame.byteLength <= 32 * 1024 * 1024 + 5)).toBe(true);
+		expect(written.map(decodeClientFrame).some((frame) => frame.message.case === "execClientControlMessage")).toBe(
+			true,
+		);
+	});
 });

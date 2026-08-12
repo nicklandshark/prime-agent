@@ -1,3 +1,4 @@
+import { getEventListeners } from "node:events";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -129,6 +130,7 @@ describe("Cursor Agent OAuth", () => {
 				JSON.stringify({ accessToken: jwt(Math.floor(Date.now() / 1000) + 3600), refreshToken: "discard-me" }),
 				{
 					status: 200,
+					headers: { "content-type": "application/json" },
 				},
 			),
 		);
@@ -159,6 +161,7 @@ describe("Cursor Agent OAuth", () => {
 			.mockResolvedValueOnce(
 				new Response(JSON.stringify({ accessToken: "browser-access", refreshToken: "browser-refresh" }), {
 					status: 200,
+					headers: { "content-type": "application/json" },
 				}),
 			);
 		const pending = pollCursorAuth("fixture-uuid", "fixture-verifier");
@@ -170,5 +173,25 @@ describe("Cursor Agent OAuth", () => {
 		const aborted = pollCursorAuth("fixture-uuid", "fixture-verifier", controller.signal);
 		controller.abort();
 		await expect(aborted).rejects.toMatchObject({ name: "AbortError" });
+	});
+
+	it("removes the poll sleep listener after repeated pending responses and success", async () => {
+		vi.useFakeTimers();
+		const controller = new AbortController();
+		const before = getEventListeners(controller.signal, "abort").length;
+		vi.spyOn(globalThis, "fetch")
+			.mockResolvedValueOnce(new Response("", { status: 404 }))
+			.mockResolvedValueOnce(new Response("", { status: 404 }))
+			.mockResolvedValueOnce(new Response("", { status: 404 }))
+			.mockResolvedValueOnce(
+				new Response(JSON.stringify({ accessToken: "a", refreshToken: "r" }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				}),
+			);
+		const pending = pollCursorAuth("fixture-uuid", "fixture-verifier", controller.signal);
+		await vi.advanceTimersByTimeAsync(10_000);
+		await expect(pending).resolves.toEqual({ accessToken: "a" });
+		expect(getEventListeners(controller.signal, "abort").length).toBe(before);
 	});
 });

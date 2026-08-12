@@ -73,7 +73,7 @@ describe("cursor-not-cloud model routing", () => {
 		expect(usage.cost).toEqual({ input: 4, output: 18, cacheRead: 0, cacheWrite: 0, total: 22 });
 	});
 
-	it("uses explicit/env client version before the schema-matched pin and rejects header injection", () => {
+	it("uses explicit/env client version before the tested client pin and rejects header injection", () => {
 		expect(resolveCursorClientVersion("cli-custom-1")).toBe("cli-custom-1");
 		expect(resolveCursorClientVersion()).toMatch(/^cli-2026\.08\.11-e8db854$/);
 		expect(() => resolveCursorClientVersion("cli-ok\r\nx-evil: 1")).toThrow(/header-safe/);
