@@ -20,7 +20,7 @@ afterEach(() => {
 function fixture() {
 	const dir = mkdtempSync(join(tmpdir(), "cursor-auth-recovery-"));
 	dirs.push(dir);
-	const model = getModel("cursor-not-cloud", "cursor-grok-4.5-high");
+	const model = getModel("cursor-not-cloud", "cursor-grok-4.6-high");
 	if (!model) throw new Error("missing cursor model");
 	const agent = new Agent({
 		getApiKey: () => "failed-token",
@@ -129,7 +129,7 @@ describe("cursor-not-cloud AgentSession auth recovery", () => {
 			},
 		});
 		const registry = ModelRegistry.inMemory(auth);
-		const model = getModel("cursor-not-cloud", "cursor-grok-4.5-high")!;
+		const model = getModel("cursor-not-cloud", "cursor-grok-4.6-high")!;
 		const oldAuth = await registry.getApiKeyAndHeaders(model);
 		if (!oldAuth.ok || !oldAuth.sourceToken) throw new Error("missing old request source");
 		let release!: () => void;
@@ -170,7 +170,7 @@ describe("cursor-not-cloud AgentSession auth recovery", () => {
 			},
 		});
 		const registry = ModelRegistry.inMemory(auth);
-		const model = getModel("cursor-not-cloud", "cursor-grok-4.5-high")!;
+		const model = getModel("cursor-not-cloud", "cursor-grok-4.6-high")!;
 		const requestAuth = await registry.getApiKeyAndHeaders(model);
 		if (!requestAuth.ok || !requestAuth.sourceToken) throw new Error("missing request source");
 		const refresh = vi.spyOn(auth, "forceRefreshOAuthToken").mockResolvedValue("unchanged-access");

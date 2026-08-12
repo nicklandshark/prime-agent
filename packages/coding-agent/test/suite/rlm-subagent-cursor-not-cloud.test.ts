@@ -1,70 +1,44 @@
 import { fauxAssistantMessage, getModel } from "@earendil-works/pi-ai";
 import { resolveCursorAgentModelId } from "@earendil-works/pi-ai/cursor-not-cloud";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { createHarness } from "./harness.js";
 
 const cursorOptions = {
 	api: "cursor-not-cloud",
 	provider: "cursor-not-cloud",
 	models: [
-		{ id: "cursor-grok-4.5-high", name: "Cursor Grok 4.5", reasoning: true },
-		{ id: "cursor-grok-4.6-high", name: "Cursor Grok 4.6", reasoning: true },
+		{
+			id: "cursor-grok-4.6-high",
+			name: "Cursor Grok 4.6",
+			reasoning: true,
+			thinkingLevelMap: {
+				off: null,
+				minimal: null,
+				low: "cursor-grok-4.6-low",
+				medium: "cursor-grok-4.6-medium",
+				high: "cursor-grok-4.6-high",
+				xhigh: "cursor-grok-4.6-xhigh",
+				max: null,
+			},
+		},
 	],
 };
-const cursor46Options = {
-	...cursorOptions,
-	models: [{ id: "cursor-grok-4.6-high", name: "Cursor Grok 4.6", reasoning: true }],
-};
-const realModel = getModel("cursor-not-cloud", "cursor-grok-4.5-high");
-const realModel46 = getModel("cursor-not-cloud", "cursor-grok-4.6-high");
-if (!realModel || !realModel46) throw new Error("Cursor Grok model missing");
+const realModel = getModel("cursor-not-cloud", "cursor-grok-4.6-high");
+if (!realModel) throw new Error("Cursor Grok model missing");
 
 describe("RLM cursor-not-cloud reasoning and fast inheritance", () => {
-	it.each([
-		["omitted inherits priority", "priority", undefined, true, "cursor-grok-4.5-high-fast"],
-		["true enables priority", "default", true, true, "cursor-grok-4.5-high-fast"],
-		["false forces default", "priority", false, false, "cursor-grok-4.5-high"],
-	] as const)("%s", async (_name, parentTier, fast, expectedFast, expectedRoute) => {
-		const harness = await createHarness(cursorOptions);
-		try {
-			harness.session.setThinkingLevel("high");
-			harness.session.setServiceTier(parentTier);
-			harness.setResponses([
-				(_context, options) => {
-					expect(resolveCursorAgentModelId(realModel, options)).toBe(expectedRoute);
-					return fauxAssistantMessage("cursor child answer");
-				},
-			]);
-			const kwargs = fast === undefined ? {} : { fast };
-			const result = await harness.session.runRlmChild("run with inherited Cursor subscription settings", kwargs);
-			expect(result).toMatchObject({
-				model: "cursor-not-cloud/cursor-grok-4.5-high",
-				thinking: "high",
-				fast: expectedFast,
-			});
-			expect(harness.session.serviceTier).toBe(parentTier);
-			await vi.waitFor(() => {
-				expect(harness.session.getRlmChildSession(result.rlm_child_id)?.serviceTier).toBe(
-					expectedFast ? "priority" : "default",
-				);
-			});
-		} finally {
-			harness.cleanup();
-		}
-	});
-
 	it.each([
 		["omitted inherits priority", "priority", undefined, true, "cursor-grok-4.6-xhigh-fast"],
 		["true enables priority", "default", true, true, "cursor-grok-4.6-xhigh-fast"],
 		["false forces default", "priority", false, false, "cursor-grok-4.6-xhigh"],
 	] as const)("Grok 4.6 %s", async (_name, parentTier, fast, expectedFast, expectedRoute) => {
-		const harness = await createHarness(cursor46Options);
+		const harness = await createHarness(cursorOptions);
 		try {
-			await harness.session.setModel(realModel46);
+			await harness.session.setModel(realModel);
 			harness.session.setServiceTier(parentTier);
 			harness.setResponses([
 				(_context, options) => {
-					expect(resolveCursorAgentModelId(realModel46, options)).toBe(expectedRoute);
+					expect(resolveCursorAgentModelId(realModel, options)).toBe(expectedRoute);
 					return fauxAssistantMessage("cursor child answer");
 				},
 			]);
@@ -85,9 +59,10 @@ describe("RLM cursor-not-cloud reasoning and fast inheritance", () => {
 	it("reports resolved thinking, rejects null fast, and rejects cloud targeting kwargs", async () => {
 		const harness = await createHarness(cursorOptions);
 		try {
+			await harness.session.setModel(realModel);
 			harness.setResponses([fauxAssistantMessage("clamped")]);
-			const result = await harness.session.runRlmChild("clamp unsupported xhigh", { thinking: "xhigh" });
-			expect(result.thinking).toBe("high");
+			const result = await harness.session.runRlmChild("clamp unsupported max", { thinking: "max" });
+			expect(result.thinking).toBe("xhigh");
 			await expect(harness.session.runRlmChild("bad null", { fast: null })).rejects.toThrow(
 				"rlm.run fast must be a boolean",
 			);

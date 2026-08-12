@@ -43,15 +43,16 @@ describe("cursor-not-cloud partial catalog RLM resolution", () => {
 	});
 
 	test("keeps the logical model when any normal route is entitled without mutating route metadata", async () => {
-		getCatalog.mockResolvedValueOnce(catalog("cursor-grok-4.5-low"));
+		getCatalog.mockResolvedValueOnce(catalog("cursor-grok-4.6-low"));
 		const executable = await registry().getExecutableModels();
 		const models = executable.filter((candidate) => candidate.provider === "cursor-not-cloud");
-		expect(models.map((model) => model.id)).toEqual(["cursor-grok-4.5-high"]);
+		expect(models.map((model) => model.id)).toEqual(["cursor-grok-4.6-high"]);
 		const model = models[0];
 		expect(model?.thinkingLevelMap).toMatchObject({
-			low: "cursor-grok-4.5-low",
-			medium: "cursor-grok-4.5-medium",
-			high: "cursor-grok-4.5-high",
+			low: "cursor-grok-4.6-low",
+			medium: "cursor-grok-4.6-medium",
+			high: "cursor-grok-4.6-high",
+			xhigh: "cursor-grok-4.6-xhigh",
 		});
 	});
 
@@ -69,7 +70,7 @@ describe("cursor-not-cloud partial catalog RLM resolution", () => {
 	});
 
 	test.each([
-		["fast-only", ["cursor-grok-4.5-high-fast"]],
+		["fast-only", ["cursor-grok-4.6-high-fast"]],
 		["successful-empty", []],
 	] as const)("hides the logical RLM model for %s discovery", async (_name, ids) => {
 		getCatalog.mockResolvedValueOnce(catalog(...ids));
@@ -86,12 +87,12 @@ describe("cursor-not-cloud partial catalog RLM resolution", () => {
 		const recover = vi.spyOn(value, "recoverCursorNotCloudOfficialCredential").mockResolvedValueOnce(true);
 		getCatalog
 			.mockRejectedValueOnce(Object.assign(new Error("unauthorized"), { status: 401, name: "CursorDiscoveryError" }))
-			.mockResolvedValueOnce(catalog("cursor-grok-4.5-high"));
+			.mockResolvedValueOnce(catalog("cursor-grok-4.6-high"));
 		// The production branch intentionally uses instanceof; construct the exact exported error.
 		const discovery = await import("@earendil-works/pi-ai/cursor-not-cloud/discovery");
 		getCatalog.mockReset();
 		getCatalog.mockRejectedValueOnce(new discovery.CursorDiscoveryError("unauthorized", "http", 401));
-		getCatalog.mockResolvedValueOnce(catalog("cursor-grok-4.5-high"));
+		getCatalog.mockResolvedValueOnce(catalog("cursor-grok-4.6-high"));
 		const models = await value.getExecutableModels();
 		expect(recover).toHaveBeenCalledTimes(1);
 		expect(recover).toHaveBeenCalledWith(requestAuth.sourceToken);
@@ -134,7 +135,7 @@ describe("cursor-not-cloud partial catalog RLM resolution", () => {
 					rejectOld = reject;
 				});
 			}
-			return Promise.resolve(catalog("cursor-grok-4.5-high"));
+			return Promise.resolve(catalog("cursor-grok-4.6-high"));
 		});
 		const stale = vi.spyOn(value, "markProviderAuthSourceStale");
 		const first = value.getExecutableModels();

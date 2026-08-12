@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clampThinkingLevel, getModel, getSupportedThinkingLevels, supportsFastMode } from "../src/index.js";
+import { clampThinkingLevel, getModel, getModels, getSupportedThinkingLevels, supportsFastMode } from "../src/index.js";
 import {
 	CURSOR_GROK_45_ROUTE_IDS,
 	CURSOR_GROK_46_ROUTE_IDS,
@@ -8,11 +8,31 @@ import {
 	resolveCursorAgentModelId,
 	resolveCursorClientVersion,
 } from "../src/providers/cursor-not-cloud/index.js";
-import type { ModelThinkingLevel, Usage } from "../src/types.js";
+import type { Model, ModelThinkingLevel, Usage } from "../src/types.js";
 
-const grok = getModel("cursor-not-cloud", "cursor-grok-4.5-high");
+const grok: Model<"cursor-not-cloud"> = {
+	id: "cursor-grok-4.5-high",
+	name: "Cursor Grok 4.5",
+	provider: "cursor-not-cloud",
+	api: "cursor-not-cloud",
+	baseUrl: "https://api2.cursor.sh",
+	reasoning: true,
+	thinkingLevelMap: {
+		off: null,
+		minimal: null,
+		low: "cursor-grok-4.5-low",
+		medium: "cursor-grok-4.5-medium",
+		high: "cursor-grok-4.5-high",
+		xhigh: null,
+		max: null,
+	},
+	input: ["text"],
+	cost: { input: 2, output: 6, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 256000,
+	maxTokens: 64000,
+};
 const grok46 = getModel("cursor-not-cloud", "cursor-grok-4.6-high");
-if (!grok || !grok46) throw new Error("missing Cursor Grok fixture model");
+if (!grok46) throw new Error("missing Cursor Grok fixture model");
 
 const matrix: Array<[ModelThinkingLevel, "low" | "medium" | "high", string, string]> = [
 	["off", "low", "cursor-grok-4.5-low", "cursor-grok-4.5-low-fast"],
@@ -35,17 +55,9 @@ const matrix46: Array<[ModelThinkingLevel, "low" | "medium" | "high" | "xhigh", 
 ];
 
 describe("cursor-not-cloud model routing", () => {
-	it("ships both logical Grok models with reviewed metadata", () => {
+	it("ships only logical Grok 4.6 with reviewed metadata", () => {
+		expect(getModels("cursor-not-cloud").map((model) => model.id)).toEqual(["cursor-grok-4.6-high"]);
 		expect(getSupportedThinkingLevels(grok)).toEqual(["low", "medium", "high"]);
-		expect(grok).toMatchObject({
-			name: "Cursor Grok 4.5",
-			provider: "cursor-not-cloud",
-			api: "cursor-not-cloud",
-			baseUrl: "https://api2.cursor.sh",
-			contextWindow: 256000,
-			maxTokens: 64000,
-			cost: { input: 2, output: 6, cacheRead: 0, cacheWrite: 0 },
-		});
 		expect(getSupportedThinkingLevels(grok46)).toEqual(["low", "medium", "high", "xhigh"]);
 		expect(grok46).toMatchObject({
 			name: "Cursor Grok 4.6",
@@ -89,8 +101,8 @@ describe("cursor-not-cloud model routing", () => {
 	});
 
 	it("enables fast only for the logical subscription Grok model", () => {
-		expect(supportsFastMode(grok)).toBe(true);
 		expect(supportsFastMode(grok46)).toBe(true);
+		expect(supportsFastMode(grok)).toBe(false);
 		const cloud = getModel("cursor", "cloud-agent");
 		expect(cloud && supportsFastMode(cloud)).toBe(false);
 	});

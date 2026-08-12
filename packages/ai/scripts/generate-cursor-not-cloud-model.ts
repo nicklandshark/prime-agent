@@ -3,26 +3,6 @@ import { readFileSync, writeFileSync } from "node:fs";
 
 const target = new URL("../src/models.generated.ts", import.meta.url);
 const block = `	"cursor-not-cloud": {
-		"cursor-grok-4.5-high": {
-			id: "cursor-grok-4.5-high",
-			name: "Cursor Grok 4.5",
-			api: "cursor-not-cloud",
-			provider: "cursor-not-cloud",
-			baseUrl: "https://api2.cursor.sh",
-			reasoning: true,
-			thinkingLevelMap: {"off":null,"minimal":null,"low":"cursor-grok-4.5-low","medium":"cursor-grok-4.5-medium","high":"cursor-grok-4.5-high","xhigh":null,"max":null},
-			input: ["text"],
-			// Published model-pool estimates (USD/M tokens), not Cursor subscription invoices.
-			cost: {
-				input: 2,
-				output: 6,
-				cacheRead: 0,
-				cacheWrite: 0,
-			},
-			contextWindow: 256000,
-			maxTokens: 64000,
-			featured: true,
-		} satisfies Model<"cursor-not-cloud">,
 		"cursor-grok-4.6-high": {
 			id: "cursor-grok-4.6-high",
 			name: "Cursor Grok 4.6",

@@ -94,9 +94,32 @@ afterAll(async () => await new Promise<void>((resolve) => server.close(() => res
 function fixtureModel(
 	modelId: "cursor-grok-4.5-high" | "cursor-grok-4.6-high" = "cursor-grok-4.5-high",
 ): Model<"cursor-not-cloud"> {
-	const model = getModel("cursor-not-cloud", modelId);
-	if (!model) throw new Error("missing model");
-	return { ...model, baseUrl };
+	if (modelId === "cursor-grok-4.6-high") {
+		const model = getModel("cursor-not-cloud", "cursor-grok-4.6-high");
+		if (!model) throw new Error("missing model");
+		return { ...model, baseUrl };
+	}
+	return {
+		id: modelId,
+		name: "Cursor Grok 4.5",
+		api: "cursor-not-cloud",
+		provider: "cursor-not-cloud",
+		baseUrl,
+		reasoning: true,
+		thinkingLevelMap: {
+			off: null,
+			minimal: null,
+			low: "cursor-grok-4.5-low",
+			medium: "cursor-grok-4.5-medium",
+			high: "cursor-grok-4.5-high",
+			xhigh: null,
+			max: null,
+		},
+		input: ["text"],
+		cost: { input: 2, output: 6, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 256000,
+		maxTokens: 64000,
+	};
 }
 
 async function assertWireRoute(

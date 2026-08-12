@@ -24,8 +24,8 @@ describe("Fast mode", () => {
 	});
 
 	it("supports Cursor Grok without enabling fast for Cursor Kimi", () => {
-		expect(supportsFastMode(model("cursor-not-cloud", "cursor-grok-4.5-high", "cursor-not-cloud"))).toBe(true);
 		expect(supportsFastMode(model("cursor-not-cloud", "cursor-grok-4.6-high", "cursor-not-cloud"))).toBe(true);
+		expect(supportsFastMode(model("cursor-not-cloud", "cursor-grok-4.5-high", "cursor-not-cloud"))).toBe(false);
 		expect(supportsFastMode(model("cursor-not-cloud", "kimi-k3-max", "cursor-not-cloud"))).toBe(false);
 		expect(supportsFastMode(model("cursor", "cursor-grok-4.5-high", "cursor-cloud-agents"))).toBe(false);
 	});

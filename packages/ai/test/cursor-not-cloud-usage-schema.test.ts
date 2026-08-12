@@ -69,7 +69,7 @@ message TurnEndedUpdate {
 			content: [],
 			api: "cursor-not-cloud",
 			provider: "cursor-not-cloud",
-			model: "cursor-grok-4.5-high",
+			model: "cursor-grok-4.6-high",
 			usage: emptyUsage(),
 			stopReason: "stop",
 			timestamp: 1,
@@ -112,9 +112,9 @@ message TurnEndedUpdate {
 			reasoning: 7,
 			totalTokens: 11189,
 		});
-		const model = getModel("cursor-not-cloud", "cursor-grok-4.5-high");
+		const model = getModel("cursor-not-cloud", "cursor-grok-4.6-high");
 		if (!model) throw new Error("model missing");
-		calculateCursorAgentUsageCost(model, "cursor-grok-4.5-high", output.usage);
+		calculateCursorAgentUsageCost(model, "cursor-grok-4.6-high", output.usage);
 		expect(output.usage.cost.input).toBeCloseTo((11161 * 2) / 1_000_000);
 		expect(output.usage.cost.output).toBeCloseTo((23 * 6) / 1_000_000);
 	});

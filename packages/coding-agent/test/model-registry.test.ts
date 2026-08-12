@@ -1694,9 +1694,9 @@ describe("cursor cloud/subscription catalog coexistence", () => {
 		auth.setRuntimeApiKey("cursor", "fixture-cloud-key");
 		const registry = ModelRegistry.inMemory(auth);
 		const snapshot = await registry.refreshModelCatalog();
-		expect(snapshot.models.filter((model) => model.provider === "cursor-not-cloud").map((model) => model.id)).toEqual(
-			["cursor-grok-4.5-high", "cursor-grok-4.6-high"],
-		);
+		const cursorSubscriptionModels = snapshot.models.filter((model) => model.provider === "cursor-not-cloud");
+		expect(cursorSubscriptionModels.map((model) => model.id)).toEqual(["cursor-grok-4.6-high"]);
+		expect(cursorSubscriptionModels[0]?.contextWindow).toBe(256000);
 		expect(snapshot.models.some((model) => model.provider === "cursor")).toBe(false);
 		expect(snapshot.configuredProviders).toContain("cursor-not-cloud");
 		expect(snapshot.configuredProviders).not.toContain("cursor");

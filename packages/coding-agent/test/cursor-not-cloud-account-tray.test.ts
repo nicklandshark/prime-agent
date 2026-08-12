@@ -27,7 +27,7 @@ function callTray(
 	token: { valueFingerprint: string } | undefined,
 	thinking = "high",
 	fast = true,
-	modelName = "Cursor Grok 4.5",
+	modelName = "Cursor Grok 4.6",
 ): string {
 	const fakeThis = Object.create(InteractiveMode.prototype);
 	fakeThis.connectionState = {
@@ -68,7 +68,7 @@ describe("Cursor subscription account tray", () => {
 		);
 		const tokenA = source("fingerprint-a");
 		manager.observeCredential(jwt("auth-account-a"), tokenA);
-		expect(callTray(tokenA)).toBe("Cursor Grok 4.5 (account-a@example.test) • high • fast");
+		expect(callTray(tokenA)).toBe("Cursor Grok 4.6 (account-a@example.test) • high • fast");
 
 		writeFileSync(
 			config,
@@ -76,11 +76,11 @@ describe("Cursor subscription account tray", () => {
 		);
 		const tokenB = source("fingerprint-b");
 		manager.observeCredential(jwt("auth-account-b"), tokenB);
-		expect(callTray(tokenB, "medium", false)).toBe("Cursor Grok 4.5 (account-b@example.test) • medium");
+		expect(callTray(tokenB, "medium", false)).toBe("Cursor Grok 4.6 (account-b@example.test) • medium");
 		expect(manager.getDisplayLabel(tokenA)).toBe("account-a@example.test");
 
 		manager.invalidate(tokenB);
-		expect(callTray(undefined)).toBe("Cursor Grok 4.5 • high • fast");
+		expect(callTray(undefined)).toBe("Cursor Grok 4.6 • high • fast");
 	});
 
 	it("falls back to shortened stable auth id, then Cursor subscription", () => {
@@ -105,9 +105,9 @@ describe("Cursor subscription account tray", () => {
 		const manager = getCursorNotCloudAccountManager();
 		const runtime = { ...source("runtime-fingerprint"), source: "runtime" as const };
 		manager.observeCredential("opaque-runtime-token", runtime);
-		expect(callTray(runtime)).toBe("Cursor Grok 4.5 (Cursor subscription) • high • fast");
+		expect(callTray(runtime)).toBe("Cursor Grok 4.6 (Cursor subscription) • high • fast");
 		await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalled());
-		await vi.waitFor(() => expect(callTray(runtime)).toBe("Cursor Grok 4.5 (runtime@example.test) • high • fast"));
+		await vi.waitFor(() => expect(callTray(runtime)).toBe("Cursor Grok 4.6 (runtime@example.test) • high • fast"));
 	});
 
 	it("removes the runtime account suffix after the active override is removed", async () => {
@@ -117,14 +117,14 @@ describe("Cursor subscription account tray", () => {
 		const auth = AuthStorage.inMemory();
 		auth.setRuntimeApiKey("cursor-not-cloud", jwt("runtime-account-id"));
 		const registry = ModelRegistry.inMemory(auth);
-		const model = getModel("cursor-not-cloud", "cursor-grok-4.5-high")!;
+		const model = getModel("cursor-not-cloud", "cursor-grok-4.6-high")!;
 		const resolved = await registry.getApiKeyAndHeaders(model);
 		if (!resolved.ok || !resolved.sourceToken) throw new Error("missing runtime source");
 		expect(callTray(registry.getCurrentProviderAuthSourceToken("cursor-not-cloud"))).toContain("(");
 		auth.removeRuntimeApiKey("cursor-not-cloud");
 		expect(registry.getCurrentProviderAuthSourceToken("cursor-not-cloud")).toBeUndefined();
 		expect(callTray(registry.getCurrentProviderAuthSourceToken("cursor-not-cloud"))).toBe(
-			"Cursor Grok 4.5 • high • fast",
+			"Cursor Grok 4.6 • high • fast",
 		);
 		expect(getCursorNotCloudAccountManager().getDisplayLabel(resolved.sourceToken)).toBe("Cursor subscription");
 	});
@@ -137,14 +137,14 @@ describe("Cursor subscription account tray", () => {
 			"cursor-not-cloud": { type: "api_key", key: jwt("stored-account-id") },
 		});
 		const registry = ModelRegistry.inMemory(auth);
-		const model = getModel("cursor-not-cloud", "cursor-grok-4.5-high")!;
+		const model = getModel("cursor-not-cloud", "cursor-grok-4.6-high")!;
 		const resolved = await registry.getApiKeyAndHeaders(model);
 		if (!resolved.ok || !resolved.sourceToken) throw new Error("missing stored source");
 		expect(callTray(registry.getCurrentProviderAuthSourceToken("cursor-not-cloud"))).toContain("(");
 		auth[operation]("cursor-not-cloud");
 		expect(registry.getCurrentProviderAuthSourceToken("cursor-not-cloud")).toBeUndefined();
 		expect(callTray(registry.getCurrentProviderAuthSourceToken("cursor-not-cloud"))).toBe(
-			"Cursor Grok 4.5 • high • fast",
+			"Cursor Grok 4.6 • high • fast",
 		);
 		expect(getCursorNotCloudAccountManager().getDisplayLabel(resolved.sourceToken)).toBe("Cursor subscription");
 	});

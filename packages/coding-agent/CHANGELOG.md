@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Added Cursor subscription login, account status, and Grok 4.6 model support through the native AgentService provider ([#6](https://github.com/nicklandshark/prime-agent/pull/6) by [@nicklandshark](https://github.com/nicklandshark)).
 - Added a `cursor` provider that converses with Cursor cloud agents as a model backend (`CURSOR_API_KEY` + `CURSOR_CLOUD_REPO`; default model `cloud-agent`), documented in `docs/providers.md`.
 - Added privacy-safe pseudonymous product analytics for onboarding, command use, execution modes, run outcomes, TTFT, latency, usage, tools, retries, and compactions, with disclosure and opt-out controls ([ENG-4682](https://linear.app/primeintellect/issue/ENG-4682/add-privacy-safe-posthog-analytics-to-prime-agent)).
 - Changed sent agent messages in the IPython cell UI to show only the message text with a `╰─` gutter when expanded, matching received messages, and hid the raw `agent_message.send` receipt dictionary.
