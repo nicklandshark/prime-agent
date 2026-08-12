@@ -1802,7 +1802,7 @@ async function generateModels() {
 				cacheRead: 0,
 				cacheWrite: 0,
 			},
-			contextWindow: 256000,
+			contextWindow: 128000,
 			maxTokens: 16384,
 		});
 	}
@@ -2334,7 +2334,7 @@ async function generateModels() {
 			input: ["text"],
 			// Published model-pool estimates (USD/M tokens), not Cursor subscription invoices.
 			cost: { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 },
-			contextWindow: 128000,
+			contextWindow: 256000,
 			// Conservative local fallback only; AgentService Run does not send this as an output limit.
 			maxTokens: 64000,
 			featured: true,
