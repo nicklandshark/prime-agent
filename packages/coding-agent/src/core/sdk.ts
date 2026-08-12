@@ -325,7 +325,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const isOpenAICodex = model.provider === OPENAI_CODEX_PROVIDER_ID;
 			const preExistingAuthFailure = options?.onAuthFailure;
 			const preExistingOnResponse = options?.onResponse;
-			return streamSimple(model, context, {
+			const stream = streamSimple(model, context, {
 				...options,
 				apiKey: auth.apiKey,
 				timeoutMs: options?.timeoutMs ?? providerRetrySettings.timeoutMs,
@@ -355,6 +355,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						}
 					: {}),
 			});
+			modelRegistry.bindRequestAuthSource(stream, auth.sourceToken);
+			return stream;
 		},
 		onPayload: async (payload, _model) => {
 			const runner = extensionRunnerRef.current;

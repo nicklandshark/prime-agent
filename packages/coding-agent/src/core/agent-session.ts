@@ -1384,6 +1384,7 @@ export class AgentSession {
 			includeAllExtensionTools: true,
 		});
 		const cursorDeleteTool = createCursorDeleteTool(this._cwd);
+		this.registerDisposeCallback(() => cursorDeleteTool.dispose());
 		this.agent.setExternalTool(cursorDeleteTool);
 		this.agent.setCursorAgentBridge(
 			createCursorExecHandlers({
@@ -10220,7 +10221,10 @@ export class AgentSession {
 	}
 
 	private _captureRetryAuthFailureSource(message: AssistantMessage): AuthSourceToken | undefined {
-		const token = this._modelRegistry.getCurrentProviderAuthSourceToken(message.provider);
+		const token =
+			message.provider === "cursor-not-cloud"
+				? this._modelRegistry.getRequestAuthSourceToken(message)
+				: this._modelRegistry.getCurrentProviderAuthSourceToken(message.provider);
 		if (!token) {
 			return undefined;
 		}

@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -9,8 +9,10 @@ import { createCursorDeleteTool } from "../src/core/cursor-not-cloud/delete-tool
 import { createCursorExecHandlers } from "../src/core/cursor-not-cloud/exec-bridge.js";
 
 const tempDirs: string[] = [];
+const deleteTools: Array<ReturnType<typeof createCursorDeleteTool>> = [];
 
 afterEach(() => {
+	for (const tool of deleteTools.splice(0)) tool.dispose();
 	for (const path of tempDirs.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
@@ -36,6 +38,7 @@ function createDeleteHarness(
 	} = {},
 ) {
 	const baseTool = createCursorDeleteTool(cwd);
+	deleteTools.push(baseTool);
 	const tool: AgentTool<any> = {
 		...baseTool,
 		execute: async (toolCallId, args, signal, onUpdate) => {
@@ -342,6 +345,32 @@ describe("Cursor Agent exec bridge", () => {
 	});
 
 	it.skipIf(process.platform !== "linux")(
+		"refuses a workspace root replaced by an outside symlink after tool creation",
+		async () => {
+			const parent = mkdtempSync(join(tmpdir(), "cursor-delete-root-swap-"));
+			tempDirs.push(parent);
+			const cwd = join(parent, "workspace");
+			const original = join(parent, "workspace-original");
+			const outside = join(parent, "outside");
+			mkdirSync(cwd);
+			mkdirSync(outside);
+			writeFileSync(join(cwd, "victim.txt"), "inside");
+			writeFileSync(join(outside, "victim.txt"), "outside");
+			const tool = createCursorDeleteTool(cwd);
+			deleteTools.push(tool);
+			renameSync(cwd, original);
+			symlinkSync(outside, cwd);
+
+			await expect(tool.execute("root-swap", { path: "victim.txt" })).rejects.toThrow(/workspace root changed/i);
+			expect(existsSync(join(outside, "victim.txt"))).toBe(true);
+			expect(existsSync(join(original, "victim.txt"))).toBe(true);
+			tool.dispose();
+			tool.dispose();
+			await expect(tool.execute("disposed", { path: "victim.txt" })).rejects.toThrow(/disposed/i);
+		},
+	);
+
+	it.skipIf(process.platform !== "linux")(
 		"contains an adversarial parent symlink swap with held no-follow fds",
 		async () => {
 			const parent = mkdtempSync(join(tmpdir(), "cursor-delete-swap-"));
@@ -375,6 +404,7 @@ describe("Cursor Agent exec bridge", () => {
 			});
 			try {
 				const tool = createCursorDeleteTool(cwd);
+				deleteTools.push(tool);
 				for (let i = 0; i < 50; i++) {
 					await tool.execute(`swap-${i}`, { path: `pivot/victim-${i}` }).catch(() => undefined);
 				}

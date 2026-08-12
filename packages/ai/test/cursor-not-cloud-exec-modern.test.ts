@@ -59,6 +59,7 @@ import {
 import {
 	type BlockState,
 	CURSOR_CLIENT_VERSION,
+	type CursorExecDispatchRecord,
 	flushOpenToolCalls,
 	handleServerMessage,
 	processInteractionUpdate,
@@ -2409,7 +2410,7 @@ describe("Cursor exec hook abort", () => {
 		async function dispatchWithRegistry(
 			message: ExecServerMessage,
 			handler: NonNullable<CursorExecHandlers["read"]>,
-			registry: Map<number, Promise<void>>,
+			registry: Map<number, CursorExecDispatchRecord>,
 			written: Buffer[],
 		): Promise<void> {
 			const output = cursorAssistantMessage();
@@ -2441,10 +2442,10 @@ describe("Cursor exec hook abort", () => {
 			);
 		}
 
-		it("joins concurrent duplicate ids without invoking the read side effect twice", async () => {
+		it("rejects a concurrent duplicate id with a typed protocol error and one side effect", async () => {
 			let calls = 0;
 			const gate = deferred();
-			const registry = new Map<number, Promise<void>>();
+			const registry = new Map<number, CursorExecDispatchRecord>();
 			const written: Buffer[] = [];
 			const message = buildExecMessage({
 				case: "readArgs",
@@ -2458,26 +2459,38 @@ describe("Cursor exec hook abort", () => {
 			const first = dispatchWithRegistry(message, handler, registry, written);
 			await Promise.resolve();
 			const duplicate = dispatchWithRegistry(message, handler, registry, written);
+			await expect(duplicate).rejects.toMatchObject({
+				name: "ProviderResponseError",
+				code: "duplicate-exec",
+			});
 			gate.markStarted();
-			await Promise.all([first, duplicate]);
+			await first;
 			expect(calls).toBe(1);
 			expect(written).toHaveLength(1);
 		});
 
-		it("retains completed ids to terminal and does not replay a side effect", async () => {
+		it("rejects completed same/different-payload duplicate ids without replaying a side effect", async () => {
 			let calls = 0;
-			const registry = new Map<number, Promise<void>>();
+			const registry = new Map<number, CursorExecDispatchRecord>();
 			const written: Buffer[] = [];
 			const message = buildExecMessage({
 				case: "readArgs",
 				value: create(ReadArgsSchema, { path: "x", toolCallId: "dup-done" }),
+			});
+			const changed = create(ExecServerMessageSchema, {
+				...message,
+				message: {
+					case: "readArgs",
+					value: create(ReadArgsSchema, { path: "different", toolCallId: "dup-done" }),
+				},
 			});
 			const handler: NonNullable<CursorExecHandlers["read"]> = async () => {
 				calls++;
 				return toolResult("contents", { toolCallId: "dup-done", toolName: "read" });
 			};
 			await dispatchWithRegistry(message, handler, registry, written);
-			await dispatchWithRegistry(message, handler, registry, written);
+			await expect(dispatchWithRegistry(message, handler, registry, written)).rejects.toThrow(/same payload/i);
+			await expect(dispatchWithRegistry(changed, handler, registry, written)).rejects.toThrow(/different payload/i);
 			expect(calls).toBe(1);
 			expect(written).toHaveLength(1);
 		});
@@ -2485,7 +2498,7 @@ describe("Cursor exec hook abort", () => {
 
 	it("rejects an oversized tool reply without emitting it or repeating the handler", async () => {
 		let calls = 0;
-		const registry = new Map<number, Promise<void>>();
+		const registry = new Map<number, CursorExecDispatchRecord>();
 		const output = cursorAssistantMessage();
 		const stream = new AssistantMessageEventStream();
 		const written: Buffer[] = [];

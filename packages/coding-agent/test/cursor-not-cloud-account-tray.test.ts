@@ -1,8 +1,11 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getModel } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { AuthStorage } from "../src/core/auth-storage.js";
 import { getCursorNotCloudAccountManager } from "../src/core/cursor-not-cloud-account-manager.js";
+import { ModelRegistry } from "../src/core/model-registry.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 
 const dirs: string[] = [];
@@ -96,6 +99,45 @@ describe("Cursor subscription account tray", () => {
 		expect(callTray(runtime)).toBe("Cursor Grok 4.5 (Cursor subscription) • high • fast");
 		await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalled());
 		await vi.waitFor(() => expect(callTray(runtime)).toBe("Cursor Grok 4.5 (runtime@example.test) • high • fast"));
+	});
+
+	it("removes the runtime account suffix after the active override is removed", async () => {
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response("{}", { status: 200, headers: { "content-type": "application/json" } }),
+		);
+		const auth = AuthStorage.inMemory();
+		auth.setRuntimeApiKey("cursor-not-cloud", jwt("runtime-account-id"));
+		const registry = ModelRegistry.inMemory(auth);
+		const model = getModel("cursor-not-cloud", "cursor-grok-4.5-high")!;
+		const resolved = await registry.getApiKeyAndHeaders(model);
+		if (!resolved.ok || !resolved.sourceToken) throw new Error("missing runtime source");
+		expect(callTray(registry.getCurrentProviderAuthSourceToken("cursor-not-cloud"))).toContain("(");
+		auth.removeRuntimeApiKey("cursor-not-cloud");
+		expect(registry.getCurrentProviderAuthSourceToken("cursor-not-cloud")).toBeUndefined();
+		expect(callTray(registry.getCurrentProviderAuthSourceToken("cursor-not-cloud"))).toBe(
+			"Cursor Grok 4.5 • high • fast",
+		);
+		expect(getCursorNotCloudAccountManager().getDisplayLabel(resolved.sourceToken)).toBe("Cursor subscription");
+	});
+
+	it.each(["logout", "remove"] as const)("removes the stored account suffix after %s", async (operation) => {
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response("{}", { status: 200, headers: { "content-type": "application/json" } }),
+		);
+		const auth = AuthStorage.inMemory({
+			"cursor-not-cloud": { type: "api_key", key: jwt("stored-account-id") },
+		});
+		const registry = ModelRegistry.inMemory(auth);
+		const model = getModel("cursor-not-cloud", "cursor-grok-4.5-high")!;
+		const resolved = await registry.getApiKeyAndHeaders(model);
+		if (!resolved.ok || !resolved.sourceToken) throw new Error("missing stored source");
+		expect(callTray(registry.getCurrentProviderAuthSourceToken("cursor-not-cloud"))).toContain("(");
+		auth[operation]("cursor-not-cloud");
+		expect(registry.getCurrentProviderAuthSourceToken("cursor-not-cloud")).toBeUndefined();
+		expect(callTray(registry.getCurrentProviderAuthSourceToken("cursor-not-cloud"))).toBe(
+			"Cursor Grok 4.5 • high • fast",
+		);
+		expect(getCursorNotCloudAccountManager().getDisplayLabel(resolved.sourceToken)).toBe("Cursor subscription");
 	});
 
 	it("does not let an invalidated pending identity repopulate its fingerprint", async () => {

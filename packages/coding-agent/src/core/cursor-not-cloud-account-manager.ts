@@ -130,7 +130,10 @@ export class CursorNotCloudAccountManager {
 	}
 
 	invalidate(sourceToken?: { valueFingerprint: string }): void {
-		if (!sourceToken) return;
+		if (!sourceToken) {
+			this.clear();
+			return;
+		}
 		const fingerprint = sourceToken.valueFingerprint;
 		this.pending.get(fingerprint)?.controller.abort();
 		this.pending.delete(fingerprint);

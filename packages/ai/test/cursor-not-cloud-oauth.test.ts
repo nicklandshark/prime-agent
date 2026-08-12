@@ -153,6 +153,43 @@ describe("Cursor Agent OAuth", () => {
 		expect(credentials.expires).toBeGreaterThan(Date.now());
 	});
 
+	it.each([
+		["pending 404", 404, {}],
+		["non-2xx", 500, { "content-type": "application/json" }],
+		["wrong content type", 200, { "content-type": "text/plain" }],
+		["declared oversize", 200, { "content-type": "application/json", "content-length": String(64 * 1024 + 1) }],
+	] as const)("cancels a bounded streaming body on early %s polling disposition", async (_name, status, headers) => {
+		vi.useFakeTimers();
+		let bytesRead = 0;
+		let cancelCount = 0;
+		let calls = 0;
+		vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+			calls++;
+			if (calls > 1) {
+				return new Response(JSON.stringify({ accessToken: "a", refreshToken: "r" }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			const body = new ReadableStream<Uint8Array>({
+				pull(controller) {
+					const chunk = new Uint8Array(1024);
+					bytesRead += chunk.byteLength;
+					controller.enqueue(chunk);
+				},
+				cancel() {
+					cancelCount++;
+				},
+			});
+			return new Response(body, { status, headers });
+		});
+		const pending = pollCursorAuth("fixture-uuid", "fixture-verifier");
+		await vi.advanceTimersByTimeAsync(5_000);
+		await expect(pending).resolves.toEqual({ accessToken: "a" });
+		expect(cancelCount).toBe(1);
+		expect(bytesRead).toBeLessThanOrEqual(1024);
+	});
+
 	it("polls through a pending 404 and aborts without leaking token material", async () => {
 		vi.useFakeTimers();
 		const fetchSpy = vi

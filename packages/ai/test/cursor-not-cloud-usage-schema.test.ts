@@ -10,6 +10,7 @@ import {
 	ConversationTokenDetailsSchema,
 	InteractionQuerySchema,
 	InteractionUpdateSchema,
+	TokenDeltaUpdateSchema,
 	TurnEndedUpdateSchema,
 } from "../src/providers/cursor-not-cloud/agent_pb.js";
 import {
@@ -87,6 +88,15 @@ message TurnEndedUpdate {
 			},
 		});
 		processInteractionUpdate(terminal, output, { push() {} } as never, {} as never, usageState);
+		processInteractionUpdate(
+			create(InteractionUpdateSchema, {
+				message: { case: "tokenDelta", value: create(TokenDeltaUpdateSchema, { tokens: 999 }) },
+			}),
+			output,
+			{ push() {} } as never,
+			{} as never,
+			usageState,
+		);
 		handleConversationCheckpointUpdate(
 			create(ConversationStateStructureSchema, {
 				tokenDetails: create(ConversationTokenDetailsSchema, { usedTokens: 11184, maxTokens: 256000 }),

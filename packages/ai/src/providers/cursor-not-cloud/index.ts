@@ -100,6 +100,7 @@ import {
 	ExecClientStreamCloseSchema,
 	ExecClientThrowSchema,
 	type ExecServerMessage,
+	ExecServerMessageSchema,
 	FetchErrorSchema,
 	FetchResultSchema,
 	ForceBackgroundShellResultSchema,
@@ -923,7 +924,6 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 		let overallTimer: NodeJS.Timeout | null = null;
 		let idleTimer: NodeJS.Timeout | null = null;
 		let connectTimer: NodeJS.Timeout | null = null;
-		let abortRequest: (() => void) | undefined;
 		let debugResponseLogPromise: Promise<RequestDebugResponseLog | undefined> | undefined;
 		let resolveH2!: () => void;
 		let rejectH2!: (error: unknown) => void;
@@ -943,7 +943,7 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 		let headersAccepted = false;
 		let sawTurnEnded = false;
 		let sawEndEnvelope = false;
-		const execDispatchRegistry = new Map<number, Promise<void>>();
+		const execDispatchRegistry = new Map<number, CursorExecDispatchRecord>();
 		const toolResultSinkRegistry = new Map<string, Promise<ToolResultMessage>>();
 		let dispatchError: unknown;
 		let forcedTerminalError: unknown;
@@ -952,6 +952,7 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 		// and pair the blocks it left open, and `state` itself is scoped to the
 		// try below.
 		let openBlockState: BlockState | undefined;
+		const overallTimeoutMs = options?.timeoutMs ?? 300_000;
 		const settleH2 = (error?: unknown): void => {
 			if (h2Settled) return;
 			const rejectTerminal = (failure: unknown) => {
@@ -988,6 +989,25 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 			h2Settled = true;
 			h2Completion.resolve();
 		};
+		const failTimedOut = (kind: "connect" | "idle" | "overall") => {
+			const error = new AIError.ProviderResponseError(`Cursor ${kind} timeout after ${overallTimeoutMs}ms`, {
+				provider: "cursor-not-cloud",
+				kind: "timeout",
+			});
+			forcedTerminalError ??= error;
+			turnAbortController.abort(error);
+			settleH2(error);
+			h2Request?.close();
+		};
+		overallTimer = setTimeout(() => failTimedOut("overall"), overallTimeoutMs);
+		const onCallerAbort = () => {
+			const error = new AIError.AbortError();
+			turnAbortController.abort(error);
+			settleH2(error);
+			h2Request?.close();
+		};
+		if (options?.signal?.aborted) onCallerAbort();
+		else options?.signal?.addEventListener("abort", onCallerAbort, { once: true });
 
 		try {
 			wireModelId = resolveCursorAgentModelId(model, options);
@@ -998,24 +1018,31 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 			if (options?.signal?.aborted) {
 				throw new AIError.AbortError();
 			}
-			await validateCursorAgentRoute(apiKey, wireModelId, {
-				baseUrl: model.baseUrl,
-				clientVersion: options?.clientVersion,
-				timeoutMs: options?.timeoutMs,
-				signal: turnSignal,
-				modelIds: options?.discoveredModelIds,
-			});
+			await raceCursorExecWithAbort(
+				validateCursorAgentRoute(apiKey, wireModelId, {
+					baseUrl: model.baseUrl,
+					clientVersion: options?.clientVersion,
+					timeoutMs: options?.timeoutMs,
+					signal: turnSignal,
+					modelIds: options?.discoveredModelIds,
+				}),
+				turnSignal,
+			);
 
 			const conversationId = options?.conversationId ?? options?.sessionId ?? crypto.randomUUID();
 			const baseUrl = normalizeCursorOrigin(model.baseUrl || CURSOR_API_URL);
 			const stateKey = createCursorConversationStateKey(apiKey, baseUrl, conversationId);
 			conversationLease = cursorConversationStateStore.acquire(stateKey, Date.now(), conversationId);
 			const blobStore = conversationLease.blobStore;
-			const { requestBytes, conversationState } = await buildGrpcRequest(model, context, options, {
-				conversationId,
-				blobStore,
-				conversationState: conversationLease.conversationState,
-			});
+			const { requestBytes, conversationState } = await raceCursorExecWithAbort(
+				buildGrpcRequest(model, context, options, {
+					conversationId,
+					blobStore,
+					conversationState: conversationLease.conversationState,
+					signal: turnSignal,
+				}),
+				turnSignal,
+			);
 			conversationLease.setConversationState(conversationState);
 			const requestContextTools = buildMcpToolDefinitions(context.tools);
 
@@ -1033,21 +1060,27 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 				"x-request-id": crypto.randomUUID(),
 			};
 			const debugSession = isRequestDebugEnabled()
-				? await createRequestDebugSession({
-						protocol: "http2",
-						method: "POST",
-						url: new URL(requestPath, baseUrl).toString(),
-						headers: requestHeaders,
-						bodyBase64: Buffer.from(requestBytes).toString("base64"),
-					})
+				? await raceCursorExecWithAbort(
+						createRequestDebugSession({
+							protocol: "http2",
+							method: "POST",
+							url: new URL(requestPath, baseUrl).toString(),
+							headers: requestHeaders,
+							bodyBase64: Buffer.from(requestBytes).toString("base64"),
+						}),
+						turnSignal,
+					)
 				: undefined;
 
 			const proxyUrl = shouldBypassProxy(new URL(baseUrl)) ? undefined : getProxyForProvider(model.provider);
 			if (proxyUrl) {
-				const tlsSocket = await connectProxiedSocket(proxyUrl, baseUrl, {
-					signal: turnSignal,
-					timeoutMs: CURSOR_PROXY_TUNNEL_TIMEOUT_MS,
-				});
+				const tlsSocket = await raceCursorExecWithAbort(
+					connectProxiedSocket(proxyUrl, baseUrl, {
+						signal: turnSignal,
+						timeoutMs: CURSOR_PROXY_TUNNEL_TIMEOUT_MS,
+					}),
+					turnSignal,
+				);
 				h2Client = http2.connect(baseUrl, {
 					createConnection: () => tlsSocket,
 				});
@@ -1056,18 +1089,6 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 			}
 			h2Client.on("error", (error) => settleH2(mapH2TransportError(error, baseUrl)));
 
-			const overallTimeoutMs = options?.timeoutMs ?? 300_000;
-			const failTimedOut = (kind: "connect" | "idle" | "overall") => {
-				const error = new AIError.ProviderResponseError(`Cursor ${kind} timeout after ${overallTimeoutMs}ms`, {
-					provider: "cursor-not-cloud",
-					kind: "timeout",
-				});
-				forcedTerminalError ??= error;
-				turnAbortController.abort(error);
-				settleH2(error);
-				h2Request?.close();
-			};
-			overallTimer = setTimeout(() => failTimedOut("overall"), overallTimeoutMs);
 			connectTimer = setTimeout(() => failTimedOut("connect"), Math.min(overallTimeoutMs, 30_000));
 			h2Client.once("connect", () => {
 				if (connectTimer) clearTimeout(connectTimer);
@@ -1283,6 +1304,15 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 						h2Request?.close();
 						return;
 					}
+					if (sawTurnEnded) {
+						const error = new AIError.ProviderResponseError("Cursor sent data after turnEnded", {
+							provider: "cursor-not-cloud",
+							kind: "envelope",
+						});
+						settleH2(error);
+						h2Request?.close();
+						return;
+					}
 
 					try {
 						const serverMessage = fromBinary(AgentServerMessageSchema, messageBytes);
@@ -1416,18 +1446,6 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 				}
 			});
 
-			if (options?.signal) {
-				abortRequest = () => {
-					h2Request?.close();
-					for (const controller of execAbortControllers.values()) controller.abort();
-					void closeDebugLog().finally(() => {
-						settleH2(new AIError.AbortError());
-					});
-				};
-				if (options.signal.aborted) abortRequest();
-				else options.signal.addEventListener("abort", abortRequest, { once: true });
-			}
-
 			writeConnectMessage(h2Request, requestBytes);
 			heartbeatTimer = setInterval(sendHeartbeat, 5000);
 			await h2Completion.promise;
@@ -1459,6 +1477,7 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 			});
 			stream.end();
 		} catch (error) {
+			const terminalError = forcedTerminalError ?? error;
 			// Same reason as the success path: the Agent finalizes the synthesized
 			// call from this terminal error and clears its Cursor result buffer, so
 			// a handler still running would land its real result after `agent_end`
@@ -1480,12 +1499,12 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 				endCurrentThinkingBlock(output, stream, openBlockState);
 				flushOpenToolCalls(output, stream, openBlockState);
 			}
-			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal });
+			const result = await AIError.finalize(terminalError, { api: model.api, signal: options?.signal });
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
-			recordStreamFailure(model, output, error);
+			recordStreamFailure(model, output, terminalError);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });
@@ -1500,7 +1519,7 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 			if (overallTimer) clearTimeout(overallTimer);
 			if (idleTimer) clearTimeout(idleTimer);
 			if (connectTimer) clearTimeout(connectTimer);
-			if (abortRequest) options?.signal?.removeEventListener("abort", abortRequest);
+			options?.signal?.removeEventListener("abort", onCallerAbort);
 			turnAbortController.abort();
 			for (const controller of execAbortControllers.values()) controller.abort();
 			execAbortControllers.clear();
@@ -1566,6 +1585,12 @@ export interface UsageState {
 	sawTerminalUsage?: boolean;
 }
 
+/** One bounded correlation record per exec id, retained until the turn reaches terminal. */
+export interface CursorExecDispatchRecord {
+	requestFingerprint: string;
+	completion: Promise<void>;
+}
+
 /** Exported for tests: drives one Cursor server message through the stream (exec waits mark the stream busy). */
 export async function handleServerMessage(
 	msg: AgentServerMessage,
@@ -1581,7 +1606,7 @@ export async function handleServerMessage(
 	onConversationCheckpoint?: (checkpoint: ConversationStateStructure) => void,
 	execAbortControllers = new Map<number, AbortController>(),
 	providerSignal?: AbortSignal,
-	execDispatchRegistry = new Map<number, Promise<void>>(),
+	execDispatchRegistry = new Map<number, CursorExecDispatchRecord>(),
 ): Promise<void> {
 	const msgCase = msg.message.case;
 
@@ -1593,10 +1618,17 @@ export async function handleServerMessage(
 		handleKvServerMessage(msg.message.value as KvServerMessage, blobStore, h2Request);
 	} else if (msgCase === "execServerMessage") {
 		const execMessage = msg.message.value as ExecServerMessage;
+		const requestFingerprint = createHash("sha256")
+			.update(toBinary(ExecServerMessageSchema, execMessage))
+			.digest("hex");
 		const existing = execDispatchRegistry.get(execMessage.id);
 		if (existing) {
-			await existing;
-			return;
+			const disposition = existing.requestFingerprint === requestFingerprint ? "same payload" : "different payload";
+			throw new AIError.ProviderResponseError(`Cursor sent a duplicate exec id with ${disposition}`, {
+				provider: "cursor-not-cloud",
+				kind: "duplicate-exec",
+				execId: execMessage.id,
+			});
 		}
 		if (execDispatchRegistry.size >= 4_096) {
 			throw new AIError.ProviderResponseError("Cursor exec correlation registry exceeded its per-turn bound", {
@@ -1645,7 +1677,7 @@ export async function handleServerMessage(
 				}
 			}
 		})();
-		execDispatchRegistry.set(execMessage.id, execution);
+		execDispatchRegistry.set(execMessage.id, { requestFingerprint, completion: execution });
 		await execution;
 	} else if (msgCase === "execServerControlMessage") {
 		const control = msg.message.value.message;
@@ -4891,7 +4923,8 @@ export function processInteractionUpdate(
 		const tokenDelta = update.message.value;
 		usageState.sawTokenDelta = true;
 		if (!usageState.sawTerminalUsage) output.usage.output += tokenDelta.tokens || 0;
-		output.usage.totalTokens = output.usage.input + output.usage.output + output.usage.cacheRead;
+		output.usage.totalTokens =
+			output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 	}
 }
 
@@ -5484,6 +5517,7 @@ async function buildGrpcRequest(
 		conversationId: string;
 		blobStore: Map<string, Uint8Array>;
 		conversationState?: ConversationStateStructure;
+		signal?: AbortSignal;
 	},
 ): Promise<{
 	requestBytes: Uint8Array;
@@ -5610,7 +5644,10 @@ async function buildGrpcRequest(
 
 	let payload: AgentRunRequest = runRequest;
 	if (options?.onPayload) {
-		const transformed = await options.onPayload(runRequest, model);
+		const transformed = await raceCursorExecWithAbort(
+			Promise.resolve(options.onPayload(runRequest, model)),
+			state.signal,
+		);
 		if (transformed !== undefined) payload = transformed as AgentRunRequest;
 	}
 

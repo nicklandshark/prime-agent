@@ -21,6 +21,25 @@ function boundedString(value: unknown, maxLength = 512): string | undefined {
 	return typeof value === "string" && value.length > 0 && value.length <= maxLength ? value : undefined;
 }
 
+async function cancelIdentityBody(response: Response, reason: string, signal: AbortSignal): Promise<void> {
+	if (!response.body) return;
+	const cancellation = response.body.cancel(reason).catch(() => undefined);
+	if (signal.aborted) {
+		void cancellation;
+		throw signal.reason;
+	}
+	let onAbort: (() => void) | undefined;
+	const aborted = new Promise<never>((_resolve, reject) => {
+		onAbort = () => reject(signal.reason);
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
+	try {
+		await Promise.race([cancellation, aborted]);
+	} finally {
+		if (onAbort) signal.removeEventListener("abort", onAbort);
+	}
+}
+
 async function readBoundedIdentityBody(response: Response): Promise<Uint8Array> {
 	if (!response.body) return new Uint8Array();
 	const reader = response.body.getReader();
@@ -83,6 +102,7 @@ export async function fetchCursorAccountIdentity(
 			throw new CursorIdentityError("Cursor identity request failed", "network");
 		}
 		if (!response.ok) {
+			await cancelIdentityBody(response, "identity response rejected by HTTP status", controller.signal);
 			throw new CursorIdentityError(
 				`Cursor identity request failed with HTTP ${response.status}`,
 				"http",
@@ -91,11 +111,14 @@ export async function fetchCursorAccountIdentity(
 		}
 		const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
 		if (contentType !== "application/json") {
+			await cancelIdentityBody(response, "identity response content type rejected", controller.signal);
 			throw new CursorIdentityError("Cursor identity response had an unsupported content type", "decode");
 		}
 		const declaredLength = Number(response.headers.get("content-length") ?? 0);
-		if (declaredLength > MAX_IDENTITY_BYTES)
+		if (declaredLength > MAX_IDENTITY_BYTES) {
+			await cancelIdentityBody(response, "identity response declared length exceeded limit", controller.signal);
 			throw new CursorIdentityError("Cursor identity response was too large", "oversized");
+		}
 		const bytes = await readBoundedIdentityBody(response);
 		let payload: unknown;
 		try {

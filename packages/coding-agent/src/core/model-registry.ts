@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import {
 	type AnthropicMessagesCompat,
 	type Api,
+	type AssistantMessage,
 	type AssistantMessageEventStream,
 	type Context,
 	getModels,
@@ -271,6 +272,8 @@ export type ResolvedRequestAuth =
 			ok: true;
 			apiKey?: string;
 			headers?: Record<string, string>;
+			/** Exact credential source bound to this request. */
+			sourceToken?: AuthSourceToken;
 			/** ChatGPT account the apiKey belongs to (openai-codex only). */
 			accountId?: string;
 			/** Display label of the account (openai-codex only). */
@@ -446,7 +449,8 @@ export class ModelRegistry {
 	private providerRequestConfigs: Map<string, ProviderRequestConfig> = new Map();
 	private staleProviderRequestAuthSources: Map<string, AuthSourceToken[]> = new Map();
 	private lastProviderAuthSourceTokens: Map<string, AuthSourceToken> = new Map();
-	private cursorOfficialRecoveryAttempts = new Set<string>();
+	private cursorOfficialRecoveryAttempts = new Map<string, Promise<boolean>>();
+	private requestAuthSourceTokens = new WeakMap<AssistantMessage, AuthSourceToken>();
 	private modelRequestHeaders: Map<string, Record<string, string>> = new Map();
 	private registeredProviders: Map<string, ProviderConfigInput> = new Map();
 	private authorizedPrivatePrimeInferenceModelIds = new Set<string>();
@@ -1018,10 +1022,10 @@ export class ModelRegistry {
 					const fetchCatalog = async (apiKey: string) =>
 						await discovery.getCursorAgentModelCatalog(apiKey, { baseUrl: cursorModels[0]!.baseUrl });
 					let catalog: Awaited<ReturnType<typeof fetchCatalog>>;
+					const failedSource = auth.sourceToken;
 					try {
 						catalog = await fetchCatalog(auth.apiKey);
 					} catch (error) {
-						const failedSource = this.getCurrentProviderAuthSourceToken("cursor-not-cloud");
 						const authFailure =
 							error instanceof discovery.CursorDiscoveryError && (error.status === 401 || error.status === 403);
 						if (!authFailure || !failedSource) throw error;
@@ -1271,6 +1275,25 @@ export class ModelRegistry {
 		}
 	}
 
+	private reconcileProviderAuthSourceToken(
+		provider: string,
+		current: AuthSourceToken | undefined,
+	): AuthSourceToken | undefined {
+		if (provider !== "cursor-not-cloud") return current;
+		const cached = this.lastProviderAuthSourceTokens.get(provider);
+		if (
+			cached &&
+			(!current ||
+				cached.source !== current.source ||
+				cached.identityFingerprint !== current.identityFingerprint ||
+				cached.valueFingerprint !== current.valueFingerprint)
+		) {
+			if (provider === "cursor-not-cloud") getCursorNotCloudAccountManager().invalidate(cached);
+		}
+		this.setLastProviderAuthSourceToken(provider, current);
+		return current;
+	}
+
 	private hasConfiguredProviderRequestAuth(provider: string): boolean {
 		const source = this.getProviderRequestAuthSource(provider);
 		return source !== undefined && !this.isProviderRequestAuthStaleForStatus(provider, source);
@@ -1288,54 +1311,69 @@ export class ModelRegistry {
 
 	getCurrentProviderAuthSourceToken(provider: string): AuthSourceToken | undefined {
 		const lastRequestToken = this.lastProviderAuthSourceTokens.get(provider);
-		if (lastRequestToken) {
+		if (provider !== "cursor-not-cloud" && lastRequestToken) {
 			return lastRequestToken;
 		}
 
 		const authStorageToken = this.authStorage.getCurrentAuthSourceToken(provider);
 		if (authStorageToken) {
-			return authStorageToken;
+			return this.reconcileProviderAuthSourceToken(provider, authStorageToken);
 		}
 
 		const providerApiKey = this.providerRequestConfigs.get(provider)?.apiKey;
 		if (!providerApiKey) {
-			return undefined;
+			return this.reconcileProviderAuthSourceToken(provider, undefined);
 		}
 		const resolvedApiKey = resolveConfigValueUncached(providerApiKey);
 		const source = this.getProviderRequestAuthSource(provider, { resolvedApiKey });
 		const valueFingerprint = source?.valueFingerprint ?? source?.resolveValueFingerprint?.();
 		if (!source || !valueFingerprint || this.isProviderRequestAuthStale(provider, source)) {
-			return undefined;
+			return this.reconcileProviderAuthSourceToken(provider, undefined);
 		}
 
-		return {
+		return this.reconcileProviderAuthSourceToken(provider, {
 			provider,
 			source: source.source,
 			identityFingerprint: source.identityFingerprint,
 			valueFingerprint,
-		};
+		});
 	}
 
-	/** Re-read the official Cursor auth file once after a concrete 401/403; retry only on rotation. */
+	/** Re-read the official Cursor auth file once after a concrete 401/403; coalesce failures by old fingerprint. */
 	async recoverCursorNotCloudOfficialCredential(failed: AuthSourceToken): Promise<boolean> {
-		if (failed.provider !== "cursor-not-cloud" || failed.source !== "stored") return false;
-		if (this.cursorOfficialRecoveryAttempts.has(failed.valueFingerprint)) return false;
-		this.cursorOfficialRecoveryAttempts.add(failed.valueFingerprint);
-		const credential = this.authStorage.get("cursor-not-cloud");
-		if (credential?.type !== "oauth" || credential.credentialSource !== "cursor-cli") return false;
-		try {
-			await this.authStorage.forceRefreshOAuthToken("cursor-not-cloud");
-			const next = await this.authStorage.getApiKeyWithSourceToken("cursor-not-cloud", { includeFallback: false });
-			if (!next.apiKey || !next.sourceToken || next.sourceToken.valueFingerprint === failed.valueFingerprint) {
+		if (failed.provider !== "cursor-not-cloud") return false;
+
+		const current = this.getCurrentProviderAuthSourceToken("cursor-not-cloud");
+		if (current && current.valueFingerprint !== failed.valueFingerprint) {
+			return true;
+		}
+		if (failed.source !== "stored") return false;
+
+		const recoveryKey = `${failed.source}\0${failed.identityFingerprint}\0${failed.valueFingerprint}`;
+		const existing = this.cursorOfficialRecoveryAttempts.get(recoveryKey);
+		if (existing) return await existing;
+
+		const attempt = (async (): Promise<boolean> => {
+			const credential = this.authStorage.get("cursor-not-cloud");
+			if (credential?.type !== "oauth" || credential.credentialSource !== "cursor-cli") return false;
+			try {
+				await this.authStorage.forceRefreshOAuthToken("cursor-not-cloud");
+				const next = await this.authStorage.getApiKeyWithSourceToken("cursor-not-cloud", {
+					includeFallback: false,
+				});
+				if (!next.apiKey || !next.sourceToken || next.sourceToken.valueFingerprint === failed.valueFingerprint) {
+					return false;
+				}
+				this.setLastProviderAuthSourceToken("cursor-not-cloud", next.sourceToken);
+				getCursorNotCloudAccountManager().invalidate(failed);
+				getCursorNotCloudAccountManager().observeCredential(next.apiKey, next.sourceToken);
+				return true;
+			} catch {
 				return false;
 			}
-			this.setLastProviderAuthSourceToken("cursor-not-cloud", next.sourceToken);
-			getCursorNotCloudAccountManager().invalidate(failed);
-			getCursorNotCloudAccountManager().observeCredential(next.apiKey, next.sourceToken);
-			return true;
-		} catch {
-			return false;
-		}
+		})();
+		this.cursorOfficialRecoveryAttempts.set(recoveryKey, attempt);
+		return await attempt;
 	}
 
 	markProviderAuthSourceStale(token: AuthSourceToken): boolean {
@@ -1398,6 +1436,19 @@ export class ModelRegistry {
 			return;
 		}
 		this.modelRequestHeaders.set(key, headers);
+	}
+
+	/** Bind the exact resolved credential source to the AssistantMessage produced by this request. */
+	bindRequestAuthSource(stream: AssistantMessageEventStream, sourceToken: AuthSourceToken | undefined): void {
+		if (!sourceToken) return;
+		void stream
+			.result()
+			.then((message) => this.requestAuthSourceTokens.set(message, sourceToken))
+			.catch(() => undefined);
+	}
+
+	getRequestAuthSourceToken(message: AssistantMessage): AuthSourceToken | undefined {
+		return this.requestAuthSourceTokens.get(message);
 	}
 
 	/**
@@ -1470,6 +1521,9 @@ export class ModelRegistry {
 				ok: true,
 				apiKey,
 				headers: headers && Object.keys(headers).length > 0 ? headers : undefined,
+				...(model.provider === "cursor-not-cloud" && authSourceToken !== undefined
+					? { sourceToken: authSourceToken }
+					: {}),
 				...(accountId !== undefined ? { accountId } : {}),
 				...(accountLabel !== undefined ? { accountLabel } : {}),
 			};

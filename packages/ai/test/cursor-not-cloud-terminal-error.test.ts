@@ -8,6 +8,7 @@ import {
 	InteractionUpdateSchema,
 	ReadArgsSchema,
 	TextDeltaUpdateSchema,
+	TokenDeltaUpdateSchema,
 	ToolCallSchema,
 	ToolCallStartedUpdateSchema,
 	TurnEndedUpdateSchema,
@@ -57,7 +58,8 @@ type Scenario =
 	| { kind: "unknown-flags" }
 	| { kind: "truncated-frame" }
 	| { kind: "malformed-protobuf" }
-	| { kind: "oversized-frame" };
+	| { kind: "oversized-frame" }
+	| { kind: "data-after-turn-ended" };
 
 let server: http2.Http2Server | undefined;
 const sessions = new Set<http2.Http2Session>();
@@ -86,15 +88,29 @@ function textDeltaFrame(text: string): Buffer {
 	return frameConnectMessage(toBinary(AgentServerMessageSchema, message));
 }
 
-function turnEndedFrame(): Buffer {
+function turnEndedFrame(
+	usage: { inputTokens?: bigint; outputTokens?: bigint; cacheWriteTokens?: bigint } = {},
+): Buffer {
 	const message = create(AgentServerMessageSchema, {
 		message: {
 			case: "interactionUpdate",
 			value: create(InteractionUpdateSchema, {
 				message: {
 					case: "turnEnded",
-					value: create(TurnEndedUpdateSchema, {}),
+					value: create(TurnEndedUpdateSchema, usage),
 				},
+			}),
+		},
+	});
+	return frameConnectMessage(toBinary(AgentServerMessageSchema, message));
+}
+
+function tokenDeltaFrame(tokens: number): Buffer {
+	const message = create(AgentServerMessageSchema, {
+		message: {
+			case: "interactionUpdate",
+			value: create(InteractionUpdateSchema, {
+				message: { case: "tokenDelta", value: create(TokenDeltaUpdateSchema, { tokens }) },
 			}),
 		},
 	});
@@ -240,6 +256,16 @@ async function startServer(): Promise<string> {
 		}
 		if (scenario.kind === "malformed-end") {
 			stream.end(Buffer.concat([turnEndedFrame(), frameConnectMessage(Buffer.from("[]"), CONNECT_END_STREAM_FLAG)]));
+			return;
+		}
+		if (scenario.kind === "data-after-turn-ended") {
+			stream.end(
+				Buffer.concat([
+					turnEndedFrame({ inputTokens: 1n, outputTokens: 2n, cacheWriteTokens: 7n }),
+					tokenDeltaFrame(11),
+					connectEndFrame(),
+				]),
+			);
 			return;
 		}
 
@@ -429,6 +455,16 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(eventTypes.at(-1)).toBe("error");
 		expect(eventTypes).not.toContain("done");
 		expect(result.errorMessage).toMatch(message);
+	});
+
+	it("rejects token data after turnEnded and preserves authoritative cache-write usage", async () => {
+		scenario = { kind: "data-after-turn-ended" };
+		const baseUrl = await startServer();
+		const { eventTypes, result } = await collectStream(makeModel(baseUrl));
+		expect(eventTypes.at(-1)).toBe("error");
+		expect(eventTypes).not.toContain("done");
+		expect(result.errorMessage).toMatch(/data after turnEnded/i);
+		expect(result.usage).toMatchObject({ input: 1, output: 2, cacheWrite: 7, totalTokens: 10 });
 	});
 
 	it.each(["http-error-with-exec", "wrong-content-with-exec"] as const)(
@@ -862,6 +898,34 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(eventTypes).not.toContain("done");
 		expect(result.stopReason).toBe("aborted");
 	});
+
+	it.each(["overall timeout", "caller abort"] as const)(
+		"bounds a never-resolving pre-transport onPayload by %s and removes listeners",
+		async (mode) => {
+			const controller = new AbortController();
+			const before = getEventListeners(controller.signal, "abort").length;
+			const hookStarted = testPromiseWithResolvers<void>();
+			const stream = streamCursor(makeModel("http://127.0.0.1:1"), context, {
+				apiKey: "test-token",
+				discoveredModelIds: new Set(["cursor-grok-4.5-high"]),
+				timeoutMs: mode === "overall timeout" ? 20 : 5_000,
+				signal: controller.signal,
+				onPayload: () => {
+					hookStarted.resolve();
+					return new Promise<never>(() => {});
+				},
+			});
+			await hookStarted.promise;
+			if (mode === "caller abort") controller.abort();
+			const eventTypes: string[] = [];
+			for await (const event of stream) eventTypes.push(event.type);
+			const result = await stream.result();
+			expect(eventTypes).toEqual(["error"]);
+			expect(result.stopReason).toBe(mode === "caller abort" ? "aborted" : "error");
+			if (mode === "overall timeout") expect(result.errorMessage).toMatch(/timeout/i);
+			expect(getEventListeners(controller.signal, "abort").length).toBe(before);
+		},
+	);
 
 	it.each([
 		["compressed-frame", /compression or flags/i],

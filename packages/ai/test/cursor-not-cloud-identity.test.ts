@@ -59,6 +59,51 @@ describe("Cursor GetMe identity", () => {
 		expect(String(error)).not.toContain("private body");
 	});
 
+	it.each([
+		["non-2xx", 401, { "content-type": "application/json" }, "http"],
+		["wrong content type", 200, { "content-type": "text/plain" }, "decode"],
+		[
+			"declared oversize",
+			200,
+			{ "content-type": "application/json", "content-length": String(64 * 1024 + 1) },
+			"oversized",
+		],
+	] as const)("cancels bounded streaming bodies on early %s rejection", async (_name, status, headers, kind) => {
+		let bytesRead = 0;
+		let cancelCount = 0;
+		const body = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				const chunk = new Uint8Array(1024);
+				bytesRead += chunk.byteLength;
+				controller.enqueue(chunk);
+			},
+			cancel() {
+				cancelCount++;
+			},
+		});
+		const fetchMock = vi.fn(async () => new Response(body, { status, headers }));
+		await expect(fetchCursorAccountIdentity(token, { fetch: fetchMock as typeof fetch })).rejects.toMatchObject({
+			kind,
+		});
+		expect(cancelCount).toBe(1);
+		expect(bytesRead).toBeLessThanOrEqual(1024);
+	});
+
+	it("keeps the deadline active while an early response cancellation is pending", async () => {
+		let cancelCount = 0;
+		const body = new ReadableStream<Uint8Array>({
+			cancel() {
+				cancelCount++;
+				return new Promise<void>(() => {});
+			},
+		});
+		const fetchMock = vi.fn(async () => new Response(body, { status: 401 }));
+		await expect(
+			fetchCursorAccountIdentity(token, { fetch: fetchMock as typeof fetch, timeoutMs: 10 }),
+		).rejects.toMatchObject({ kind: "timeout" });
+		expect(cancelCount).toBe(1);
+	});
+
 	it("bounds timeout and propagates caller abort without token disclosure", async () => {
 		const hanging = vi.fn(
 			async (_url: URL | string | Request, init?: RequestInit) =>

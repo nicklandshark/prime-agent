@@ -10,6 +10,7 @@ const POLL_MAX_ATTEMPTS = 150;
 const POLL_BASE_DELAY_MS = 1_000;
 const POLL_MAX_DELAY_MS = 10_000;
 const TOKEN_EXPIRY_SKEW_MS = 5 * 60 * 1_000;
+const MAX_POLL_RESPONSE_BYTES = 64 * 1024;
 
 type CursorCredentialFile = {
 	accessToken?: unknown;
@@ -103,7 +104,30 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 	});
 }
 
-async function readBoundedPollJson(response: Response, maxBytes = 64 * 1024): Promise<unknown> {
+async function cancelPollBody(response: Response, reason: string, signal?: AbortSignal): Promise<void> {
+	if (!response.body) return;
+	const cancellation = response.body.cancel(reason).catch(() => undefined);
+	if (!signal) {
+		await cancellation;
+		return;
+	}
+	if (signal.aborted) {
+		void cancellation;
+		throw abortError();
+	}
+	let onAbort: (() => void) | undefined;
+	const aborted = new Promise<never>((_resolve, reject) => {
+		onAbort = () => reject(abortError());
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
+	try {
+		await Promise.race([cancellation, aborted]);
+	} finally {
+		if (onAbort) signal.removeEventListener("abort", onAbort);
+	}
+}
+
+async function readBoundedPollJson(response: Response, maxBytes = MAX_POLL_RESPONSE_BYTES): Promise<unknown> {
 	if (!response.body) throw new Error("Cursor authentication response was empty");
 	const reader = response.body.getReader();
 	const chunks: Uint8Array[] = [];
@@ -164,14 +188,24 @@ export async function pollCursorAuth(
 				},
 			);
 			if (response.status === 404) {
+				await cancelPollBody(response, "Cursor authentication is still pending", signal);
 				consecutiveErrors = 0;
 				delayMs = Math.min(Math.ceil(delayMs * 1.2), POLL_MAX_DELAY_MS);
 				continue;
 			}
-			if (!response.ok) throw new Error(`Cursor authentication poll failed with HTTP ${response.status}`);
+			if (!response.ok) {
+				await cancelPollBody(response, "Cursor authentication response rejected by HTTP status", signal);
+				throw new Error(`Cursor authentication poll failed with HTTP ${response.status}`);
+			}
 			const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
 			if (contentType !== "application/json") {
+				await cancelPollBody(response, "Cursor authentication response content type rejected", signal);
 				throw new Error("Cursor authentication response had an unsupported content type");
+			}
+			const declaredLength = Number(response.headers.get("content-length") ?? 0);
+			if (declaredLength > MAX_POLL_RESPONSE_BYTES) {
+				await cancelPollBody(response, "Cursor authentication response declared length exceeded limit", signal);
+				throw new Error("Cursor authentication response was too large");
 			}
 			const payload = (await readBoundedPollJson(response)) as {
 				accessToken?: unknown;
