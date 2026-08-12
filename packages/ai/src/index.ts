@@ -10,6 +10,9 @@ export type { AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay } from
 export type { AzureOpenAIResponsesOptions } from "./providers/azure-openai-responses.js";
 export type { CursorOptions } from "./providers/cursor/index.js";
 export { CURSOR_TUNNEL_PREAMBLE } from "./providers/cursor/tunnel-preamble.js";
+// Keep the root entrypoint type-only: Cursor's Node HTTP/2 runtime and generated
+// descriptor are loaded only through the dedicated `./cursor-not-cloud` subpath.
+export type { CursorAgentOptions } from "./providers/cursor-not-cloud/index.js";
 export * from "./providers/faux.js";
 export type { GoogleOptions } from "./providers/google.js";
 export type { GoogleThinkingLevel } from "./providers/google-shared.js";
@@ -25,6 +28,7 @@ export * from "./providers/register-builtins.js";
 export * from "./session-resources.js";
 export * from "./stream.js";
 export * from "./types.js";
+export * from "./utils/cursor-not-cloud-blocks.js";
 export * from "./utils/diagnostics.js";
 export * from "./utils/event-stream.js";
 export * from "./utils/json-parse.js";

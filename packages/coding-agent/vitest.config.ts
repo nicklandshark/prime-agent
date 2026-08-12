@@ -2,6 +2,11 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
 const aiSrcIndex = fileURLToPath(new URL("../ai/src/index.ts", import.meta.url));
+const aiSrcCursor = fileURLToPath(new URL("../ai/src/providers/cursor/index.ts", import.meta.url));
+const aiSrcCursorNotCloudDiscovery = fileURLToPath(
+	new URL("../ai/src/providers/cursor-not-cloud/discovery.ts", import.meta.url),
+);
+const aiSrcCursorNotCloud = fileURLToPath(new URL("../ai/src/providers/cursor-not-cloud/index.ts", import.meta.url));
 const aiSrcOAuth = fileURLToPath(new URL("../ai/src/oauth.ts", import.meta.url));
 const aiSrcMcp = fileURLToPath(new URL("../ai/src/mcp.ts", import.meta.url));
 const agentSrcIndex = fileURLToPath(new URL("../agent/src/index.ts", import.meta.url));
@@ -36,6 +41,12 @@ export default defineConfig({
 		alias: [
 			{ find: /^@earendil-works\/pi-ai$/, replacement: aiSrcIndex },
 			{ find: /^@earendil-works\/pi-ai\/oauth$/, replacement: aiSrcOAuth },
+			{ find: /^@earendil-works\/pi-ai\/cursor$/, replacement: aiSrcCursor },
+			{ find: /^@earendil-works\/pi-ai\/cursor-not-cloud$/, replacement: aiSrcCursorNotCloud },
+			{
+				find: /^@earendil-works\/pi-ai\/cursor-not-cloud\/discovery$/,
+				replacement: aiSrcCursorNotCloudDiscovery,
+			},
 			{ find: /^@earendil-works\/pi-ai\/mcp$/, replacement: aiSrcMcp },
 			{ find: /^@earendil-works\/pi-agent-core$/, replacement: agentSrcIndex },
 			{ find: /^@earendil-works\/pi-tui$/, replacement: tuiSrcIndex },

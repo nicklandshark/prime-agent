@@ -22,6 +22,14 @@
 			"types": "./dist/providers/cursor/index.d.ts",
 			"import": "./dist/providers/cursor/index.js"
 		},
+		"./cursor-not-cloud": {
+			"types": "./dist/providers/cursor-not-cloud/index.d.ts",
+			"import": "./dist/providers/cursor-not-cloud/index.js"
+		},
+		"./cursor-not-cloud/discovery": {
+			"types": "./dist/providers/cursor-not-cloud/discovery.d.ts",
+			"import": "./dist/providers/cursor-not-cloud/discovery.js"
+		},
 		"./google": {
 			"types": "./dist/providers/google.d.ts",
 			"import": "./dist/providers/google.js"
@@ -64,12 +72,15 @@
 	},
 	"files": [
 		"dist",
-		"README.md"
+		"README.md",
+		"LICENSE",
+		"NOTICE"
 	],
 	"scripts": {
 		"clean": "shx rm -rf dist",
 		"generate-models": "npx tsx scripts/generate-models.ts",
-		"build": "npm run generate-models && tsgo -p tsconfig.build.json",
+		"generate-cursor-not-cloud-proto": "buf generate src/providers/cursor-not-cloud/agent.proto --template buf.gen.yaml && node scripts/normalize-cursor-not-cloud-proto.mjs",
+		"build": "npm run generate-models && npm run generate-cursor-not-cloud-proto && tsgo -p tsconfig.build.json",
 		"dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
 		"dev:tsc": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
 		"test": "vitest --run",
@@ -78,13 +89,14 @@
 	"dependencies": {
 		"@anthropic-ai/sdk": "^0.91.1",
 		"@aws-sdk/client-bedrock-runtime": "^3.1083.0",
+		"@bufbuild/protobuf": "^2.13.0",
 		"@google/genai": "^1.40.0",
 		"@mistralai/mistralai": "^2.2.0",
-		"typebox": "^1.1.24",
 		"chalk": "^5.6.2",
 		"openai": "6.47.0",
 		"partial-json": "^0.1.7",
 		"proxy-agent": "^6.5.0",
+		"typebox": "^1.1.24",
 		"undici": "^7.28.0",
 		"zod-to-json-schema": "^3.24.6"
 	},
@@ -109,6 +121,8 @@
 		"node": ">=20.0.0"
 	},
 	"devDependencies": {
+		"@bufbuild/buf": "^1.72.0",
+		"@bufbuild/protoc-gen-es": "^2.13.0",
 		"@types/node": "^24.3.0",
 		"canvas": "^3.2.0",
 		"vitest": "^4.1.9"

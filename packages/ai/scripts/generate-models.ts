@@ -323,7 +323,10 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		mergeThinkingLevelMap(model, DEEPSEEK_V4_THINKING_LEVEL_MAP);
 	}
 	const kimiK3Id = model.id.toLowerCase();
-	if (/^k3(-|$)/.test(kimiK3Id) || /(^|\/)kimi-k3(-|$)/.test(kimiK3Id)) {
+	if (
+		model.provider !== "cursor-not-cloud" &&
+		(/^k3(-|$)/.test(kimiK3Id) || /(^|\/)kimi-k3(-|$)/.test(kimiK3Id))
+	) {
 		mergeThinkingLevelMap(model, KIMI_K3_THINKING_LEVEL_MAP);
 	}
 	if (isGoogleThinkingApi(model) && isGemini3ProModel(model.id)) {
@@ -2308,6 +2311,37 @@ async function generateModels() {
 	];
 	allModels.push(...vertexModels);
 
+	// Cursor Subscription AgentService models. These logical entries collapse Cursor's
+	// credential-gated reasoning/fast sibling IDs; live discovery fail-closes unavailable routes.
+	const CURSOR_AGENT_BASE_URL = "https://api2.cursor.sh";
+	const cursorAgentModels: Model<"cursor-not-cloud">[] = [
+		{
+			id: "cursor-grok-4.5-high",
+			name: "Cursor Grok 4.5",
+			api: "cursor-not-cloud",
+			provider: "cursor-not-cloud",
+			baseUrl: CURSOR_AGENT_BASE_URL,
+			reasoning: true,
+			thinkingLevelMap: {
+				off: null,
+				minimal: null,
+				low: "cursor-grok-4.5-low",
+				medium: "cursor-grok-4.5-medium",
+				high: "cursor-grok-4.5-high",
+				xhigh: null,
+				max: null,
+			},
+			input: ["text"],
+			// Published model-pool estimates (USD/M tokens), not Cursor subscription invoices.
+			cost: { input: 2, output: 6, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 256000,
+			// Conservative local fallback only; AgentService Run does not send this as an output limit.
+			maxTokens: 64000,
+			featured: true,
+		},
+	];
+	allModels.push(...cursorAgentModels);
+
 	// Cursor cloud agents (https://cursor.com/docs/cloud-agent). Each completion spawns or
 	// resumes a Cursor cloud agent run, so these are logical models, not inference endpoints.
 	// "cloud-agent" omits the model field so the account's server-resolved default applies.
@@ -2421,6 +2455,9 @@ export const MODELS = {
 				output += `\t\t\tthinkingLevelMap: ${JSON.stringify(model.thinkingLevelMap)},\n`;
 			}
 			output += `\t\t\tinput: [${model.input.map(i => `"${i}"`).join(", ")}],\n`;
+			if (model.provider === "cursor-not-cloud") {
+				output += `\t\t\t// Published model-pool estimates (USD/M tokens), not Cursor subscription invoices.\n`;
+			}
 			output += `\t\t\tcost: {\n`;
 			output += `\t\t\t\tinput: ${model.cost.input},\n`;
 			output += `\t\t\t\toutput: ${model.cost.output},\n`;

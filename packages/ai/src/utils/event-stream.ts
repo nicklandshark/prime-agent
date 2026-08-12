@@ -63,9 +63,17 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 	result(): Promise<R> {
 		return this.finalResultPromise;
 	}
+
+	/** Whether a terminal event or explicit end has settled this stream. */
+	get resultSettled(): boolean {
+		return this.done;
+	}
 }
 
 export class AssistantMessageEventStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
+	/** Mark an awaited provider-side tool dispatch as local work. Optional for structural test streams. */
+	trackLocalWork?: <T>(work: Promise<T>) => Promise<T> = async <T>(work: Promise<T>): Promise<T> => await work;
+
 	constructor() {
 		super(
 			(event) => event.type === "done" || event.type === "error",

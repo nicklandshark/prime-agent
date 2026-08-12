@@ -123,6 +123,8 @@ import {
 } from "./context-tree.js";
 import type { AgentCronJob, AgentRlmHeartbeatController, AgentRlmHeartbeatStatusUpdate } from "./cron-jobs.js";
 import { normalizeHeartbeatDeliveryMode } from "./cron-jobs.js";
+import { createCursorDeleteTool } from "./cursor-not-cloud/delete-tool.js";
+import { createCursorExecHandlers } from "./cursor-not-cloud/exec-bridge.js";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.js";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.js";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.js";
@@ -1381,6 +1383,17 @@ export class AgentSession {
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
+		const cursorDeleteTool = createCursorDeleteTool(this._cwd);
+		this.agent.setExternalTool(cursorDeleteTool);
+		this.agent.setCursorAgentBridge(
+			createCursorExecHandlers({
+				getTools: () => [...this.agent.state.tools, cursorDeleteTool],
+				emitEvent: (event) => this.agent.emitExternalEvent(event),
+				executeTool: (toolName, toolCallId, args, onUpdate, skipBeforeToolCall, signal) =>
+					this.agent.executeExternalTool(toolName, toolCallId, args, onUpdate, skipBeforeToolCall, signal),
+				approveTool: (toolName, toolCallId, args) => this.agent.approveExternalTool(toolName, toolCallId, args),
+			}),
+		);
 	}
 
 	/**
@@ -3588,7 +3601,11 @@ export class AgentSession {
 				concreteAuthFailure && !this._isStructuredPermanentProviderRetryExhausted(msg);
 			if (this._isRetryableError(msg) || retryConcreteAuthFailure) {
 				if (retryConcreteAuthFailure) {
-					this._captureRetryAuthFailureSource(msg);
+					const failedSource = this._captureRetryAuthFailureSource(msg);
+					if (failedSource && (await this._modelRegistry.recoverCursorNotCloudOfficialCredential(failedSource))) {
+						// The official access fingerprint rotated under the auth lock; retry with the new source.
+						this._retryAuthFailureSources = [];
+					}
 				}
 				const didRetry = await this._handleRetryableError(msg, {
 					markAuthStaleOnFailure: retryConcreteAuthFailure,
@@ -4051,6 +4068,11 @@ export class AgentSession {
 			);
 			this._disconnectFromAgent();
 			this._eventListeners = [];
+			if (this.model?.provider === "cursor-not-cloud") {
+				void import("@earendil-works/pi-ai/cursor-not-cloud")
+					.then(({ disposeCursorAgentConversation }) => disposeCursorAgentConversation(this.sessionId))
+					.catch(() => undefined);
+			}
 			cleanupSessionResources(this.sessionId);
 		} finally {
 			void this._startDisposeCallbacks();

@@ -143,7 +143,7 @@ export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
  * request, so it counts toward the context the next turn will send.
  */
 export function calculateContextTokens(usage: Usage): number {
-	return usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+	return usage.contextTokens ?? (usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite);
 }
 
 /**

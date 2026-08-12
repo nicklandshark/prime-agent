@@ -83,6 +83,7 @@ import {
 	parseHeartbeatCommand,
 } from "../../core/cron-jobs.js";
 import { getCachedCursorCloudEnvironments, listCursorCloudEnvironments } from "../../core/cursor-cloud-environments.js";
+import { getCursorNotCloudAccountManager } from "../../core/cursor-not-cloud-account-manager.js";
 import type {
 	AutocompleteProviderFactory,
 	ContextUsage,
@@ -738,6 +739,22 @@ function getActiveOpenAICodexAccountLabel(modelRegistry: unknown): string | unde
 		const manager = getOpenAICodexAccountManager(modelRegistry);
 		const active = manager?.getCachedAccounts().find((account) => account.active);
 		return active ? getOpenAICodexAccountDisplayLabel(active) : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Fingerprint-bound Cursor subscription identity for the tray. */
+function getActiveCursorNotCloudAccountLabel(modelRegistry: unknown): string | undefined {
+	try {
+		const registry = modelRegistry as {
+			getCurrentProviderAuthSourceToken(
+				provider: string,
+			): { provider: string; source: string; identityFingerprint: string; valueFingerprint: string } | undefined;
+		};
+		return getCursorNotCloudAccountManager().getDisplayLabel(
+			registry.getCurrentProviderAuthSourceToken("cursor-not-cloud"),
+		);
 	} catch {
 		return undefined;
 	}
@@ -6182,7 +6199,11 @@ export class InteractiveMode {
 			return "—";
 		}
 		const accountLabel =
-			model.provider === "openai-codex" ? getActiveOpenAICodexAccountLabel(this.modelRegistry) : undefined;
+			model.provider === "openai-codex"
+				? getActiveOpenAICodexAccountLabel(this.modelRegistry)
+				: model.provider === "cursor-not-cloud"
+					? getActiveCursorNotCloudAccountLabel(this.modelRegistry)
+					: undefined;
 		const parts = [accountLabel ? `${model.name} (${accountLabel})` : model.name];
 		if (model.reasoning) {
 			const level = this.connectionState?.thinkingLevel ?? "off";
