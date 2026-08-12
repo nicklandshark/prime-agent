@@ -1,9 +1,15 @@
+import { extractStreamFailureInfo, formatStreamFailureMessage } from "../../utils/stream-failure.js";
+
 export class ProviderResponseError extends Error {
 	readonly details?: Record<string, unknown>;
+	readonly status?: number;
+	readonly code?: string;
 	constructor(message: string, details?: Record<string, unknown>) {
 		super(message);
 		this.name = "ProviderResponseError";
 		this.details = details;
+		this.status = typeof details?.status === "number" ? details.status : undefined;
+		this.code = typeof details?.kind === "string" ? details.kind : undefined;
 	}
 }
 
@@ -33,8 +39,12 @@ export async function finalize(
 	options: { api?: string; signal?: AbortSignal },
 ): Promise<{ stopReason: "aborted" | "error"; status?: number; id?: string; message: string }> {
 	const aborted = options.signal?.aborted === true || error instanceof AbortError;
+	if (aborted) return { stopReason: "aborted", message: error instanceof Error ? error.message : String(error) };
+	const info = extractStreamFailureInfo(error);
 	return {
-		stopReason: aborted ? "aborted" : "error",
-		message: error instanceof Error ? error.message : String(error),
+		stopReason: "error",
+		...(info.status !== undefined ? { status: info.status } : {}),
+		...(info.requestId ? { id: info.requestId } : {}),
+		message: formatStreamFailureMessage(error),
 	};
 }

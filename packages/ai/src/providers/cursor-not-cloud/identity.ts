@@ -1,3 +1,5 @@
+import { normalizeCursorOrigin } from "./config.js";
+
 const GET_ME_PATH = "/aiserver.v1.DashboardService/GetMe";
 const MAX_IDENTITY_BYTES = 64 * 1024;
 
@@ -19,6 +21,35 @@ function boundedString(value: unknown, maxLength = 512): string | undefined {
 	return typeof value === "string" && value.length > 0 && value.length <= maxLength ? value : undefined;
 }
 
+async function readBoundedIdentityBody(response: Response): Promise<Uint8Array> {
+	if (!response.body) return new Uint8Array();
+	const reader = response.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			if (!value) continue;
+			total += value.byteLength;
+			if (total > MAX_IDENTITY_BYTES) {
+				await reader.cancel("identity response exceeded limit");
+				throw new CursorIdentityError("Cursor identity response was too large", "oversized");
+			}
+			chunks.push(value);
+		}
+	} finally {
+		reader.releaseLock();
+	}
+	const bytes = new Uint8Array(total);
+	let offset = 0;
+	for (const chunk of chunks) {
+		bytes.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return bytes;
+}
+
 /** Bounded JSON Connect identity RPC. The token and raw response never enter errors or returned data. */
 export async function fetchCursorAccountIdentity(
 	accessToken: string,
@@ -36,7 +67,7 @@ export async function fetchCursorAccountIdentity(
 		const fetchImpl = options.fetch ?? globalThis.fetch;
 		let response: Response;
 		try {
-			response = await fetchImpl(new URL(GET_ME_PATH, options.baseUrl ?? "https://api2.cursor.sh"), {
+			response = await fetchImpl(new URL(GET_ME_PATH, normalizeCursorOrigin(options.baseUrl)), {
 				method: "POST",
 				headers: {
 					authorization: `Bearer ${accessToken}`,
@@ -58,12 +89,14 @@ export async function fetchCursorAccountIdentity(
 				response.status,
 			);
 		}
+		const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+		if (contentType !== "application/json") {
+			throw new CursorIdentityError("Cursor identity response had an unsupported content type", "decode");
+		}
 		const declaredLength = Number(response.headers.get("content-length") ?? 0);
 		if (declaredLength > MAX_IDENTITY_BYTES)
 			throw new CursorIdentityError("Cursor identity response was too large", "oversized");
-		const bytes = new Uint8Array(await response.arrayBuffer());
-		if (bytes.length > MAX_IDENTITY_BYTES)
-			throw new CursorIdentityError("Cursor identity response was too large", "oversized");
+		const bytes = await readBoundedIdentityBody(response);
 		let payload: unknown;
 		try {
 			payload = JSON.parse(new TextDecoder().decode(bytes));

@@ -770,8 +770,6 @@ export interface Model<TApi extends Api> {
 	 * Missing keys use provider defaults. null marks a level as unsupported.
 	 */
 	thinkingLevelMap?: ThinkingLevelMap;
-	/** Concrete Cursor wire model selected from a logical reasoning route. */
-	requestModelId?: string;
 	/** Cursor's independent max-mode flag; distinct from reasoning effort. */
 	cursorMaxMode?: boolean;
 	input: ("text" | "image")[];

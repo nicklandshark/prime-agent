@@ -1,14 +1,9 @@
-import { lstat, realpath, unlink } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve, sep, win32 } from "node:path";
+import { closeSync, constants, lstatSync, openSync, realpathSync, unlinkSync } from "node:fs";
+import { isAbsolute, relative, resolve, sep, win32 } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { type Static, Type } from "typebox";
 
-const CursorDeleteParameters = Type.Object(
-	{
-		path: Type.String({ minLength: 1 }),
-	},
-	{ additionalProperties: false },
-);
+const CursorDeleteParameters = Type.Object({ path: Type.String({ minLength: 1 }) }, { additionalProperties: false });
 
 type CursorDeleteArgs = Static<typeof CursorDeleteParameters>;
 
@@ -22,10 +17,52 @@ function isContained(root: string, candidate: string): boolean {
 }
 
 /**
- * Build the hidden, workspace-scoped AgentTool used only for Cursor's native
- * delete exec frame. It is registered with Agent.executeExternalTool so schema
- * validation, policy hooks, lifecycle events, and cancellation all apply.
+ * Linux exposes an opened directory as a stable magic link in /proc/self/fd.
+ * Open every parent component with O_NOFOLLOW relative to the preceding held
+ * directory, then unlink through the final held parent. This is the unlinkat
+ * containment property Node's path-only fs.promises API cannot express.
  */
+function unlinkWorkspaceFileNoFollow(workspaceRealPath: string, relativePath: string, signal?: AbortSignal) {
+	if (process.platform !== "linux") {
+		throw new Error("Safe Cursor delete is supported only on Linux; refusing a path-racy deletion");
+	}
+	const parts = relativePath.split(sep).filter(Boolean);
+	const basename = parts.pop();
+	if (!basename || basename === "." || basename === "..") throw new Error("Invalid delete path");
+	const flags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
+	const descriptors: number[] = [];
+	try {
+		let directoryFd = openSync(workspaceRealPath, flags);
+		descriptors.push(directoryFd);
+		for (const part of parts) {
+			if (part === "." || part === "..") throw new Error("Delete path contains an unsafe parent component");
+			throwIfAborted(signal);
+			directoryFd = openSync(`/proc/self/fd/${directoryFd}/${part}`, flags);
+			descriptors.push(directoryFd);
+		}
+		throwIfAborted(signal);
+		const target = `/proc/self/fd/${directoryFd}/${basename}`;
+		const stat = lstatSync(target);
+		if (!stat.isFile() && !stat.isSymbolicLink()) {
+			throw new Error(
+				"Delete only supports regular files and symbolic links; recursive directory deletion is forbidden",
+			);
+		}
+		throwIfAborted(signal);
+		unlinkSync(target);
+		return stat;
+	} finally {
+		for (const fd of descriptors.reverse()) {
+			try {
+				closeSync(fd);
+			} catch {
+				// Best-effort descriptor cleanup; the unlink outcome remains authoritative.
+			}
+		}
+	}
+}
+
+/** Hidden, workspace-scoped delete tool used only by Cursor's native exec frame. */
 export function createCursorDeleteTool(cwd: string): AgentTool<typeof CursorDeleteParameters> {
 	const workspacePath = resolve(cwd);
 	return {
@@ -38,28 +75,13 @@ export function createCursorDeleteTool(cwd: string): AgentTool<typeof CursorDele
 			if (isAbsolute(args.path) || win32.isAbsolute(args.path)) {
 				throw new Error("Delete path must be workspace-relative; absolute paths are not allowed");
 			}
-
 			const candidate = resolve(workspacePath, args.path);
 			if (!isContained(workspacePath, candidate)) {
 				throw new Error("Delete path escapes the workspace or resolves to its root");
 			}
-
-			const workspaceRealPath = await realpath(workspacePath);
+			const workspaceRealPath = realpathSync(workspacePath);
 			throwIfAborted(signal);
-			const parentRealPath = await realpath(dirname(candidate));
-			if (!isContained(workspaceRealPath, parentRealPath) && parentRealPath !== workspaceRealPath) {
-				throw new Error("Delete path escapes the workspace through a symbolic-link directory");
-			}
-
-			const stat = await lstat(candidate);
-			if (!stat.isFile() && !stat.isSymbolicLink()) {
-				throw new Error(
-					"Delete only supports regular files and symbolic links; recursive directory deletion is forbidden",
-				);
-			}
-			throwIfAborted(signal);
-			await unlink(candidate);
-
+			const stat = unlinkWorkspaceFileNoFollow(workspaceRealPath, relative(workspacePath, candidate), signal);
 			const sizeText = stat.size ? ` (${stat.size} bytes)` : "";
 			return {
 				content: [{ type: "text", text: `Deleted ${args.path}${sizeText}` }],

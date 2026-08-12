@@ -3597,21 +3597,32 @@ export class AgentSession {
 
 			// Check for retryable errors first (overloaded, rate limit, server errors)
 			const concreteAuthFailure = this._isConcreteProviderAuthFailure(msg);
-			const retryConcreteAuthFailure =
-				concreteAuthFailure && !this._isStructuredPermanentProviderRetryExhausted(msg);
-			if (this._isRetryableError(msg) || retryConcreteAuthFailure) {
-				if (retryConcreteAuthFailure) {
-					const failedSource = this._captureRetryAuthFailureSource(msg);
-					if (failedSource && (await this._modelRegistry.recoverCursorNotCloudOfficialCredential(failedSource))) {
-						// The official access fingerprint rotated under the auth lock; retry with the new source.
-						this._retryAuthFailureSources = [];
-					}
+			let cursorAuthHandled = false;
+			if (concreteAuthFailure && msg.provider === "cursor-not-cloud") {
+				cursorAuthHandled = true;
+				const failedSource = this._captureRetryAuthFailureSource(msg);
+				const rotated =
+					failedSource !== undefined &&
+					(await this._modelRegistry.recoverCursorNotCloudOfficialCredential(failedSource));
+				if (rotated) {
+					this._retryAuthFailureSources = [];
+					const didRetry = await this._handleRetryableError(msg);
+					if (didRetry) return;
+				} else {
+					if (failedSource) this._modelRegistry.markProviderAuthSourceStale(failedSource);
+					msg.errorMessage = `${msg.errorMessage ?? "Cursor authentication failed"}. Run /login to refresh the Cursor subscription credential.`;
+					this._retryAuthFailureSources = [];
 				}
+			}
+			const retryConcreteAuthFailure =
+				!cursorAuthHandled && concreteAuthFailure && !this._isStructuredPermanentProviderRetryExhausted(msg);
+			if (!cursorAuthHandled && (this._isRetryableError(msg) || retryConcreteAuthFailure)) {
+				if (retryConcreteAuthFailure) this._captureRetryAuthFailureSource(msg);
 				const didRetry = await this._handleRetryableError(msg, {
 					markAuthStaleOnFailure: retryConcreteAuthFailure,
 					authSourceTokens: retryConcreteAuthFailure ? this._retryAuthFailureSources : undefined,
 				});
-				if (didRetry) return; // Retry was initiated, don't proceed to compaction
+				if (didRetry) return;
 			}
 
 			const compactionWillRetry = await this._checkCompaction(msg);
@@ -11116,47 +11127,45 @@ export class AgentSession {
 	getContextUsage(): ContextUsage | undefined {
 		const model = this.model;
 		if (!model) return undefined;
-
-		const contextWindow = model.contextWindow ?? 0;
-		if (contextWindow <= 0) return undefined;
-
-		// After compaction, the last assistant usage reflects pre-compaction context size.
-		// We can only trust usage from an assistant that responded after the latest compaction.
-		// If no such assistant exists, context token count is unknown until the next LLM response.
 		const branchEntries = this.sessionManager.getBranch();
 		const latestCompaction = getLatestCompactionEntry(branchEntries);
-
-		if (latestCompaction) {
-			// Check if there's a valid assistant usage after the compaction boundary
-			const compactionIndex = branchEntries.lastIndexOf(latestCompaction);
-			let hasPostCompactionUsage = false;
-			for (let i = branchEntries.length - 1; i > compactionIndex; i--) {
-				const entry = branchEntries[i];
-				if (entry.type === "message" && entry.message.role === "assistant") {
-					const assistant = entry.message;
-					if (assistant.stopReason !== "aborted" && assistant.stopReason !== "error") {
-						const contextTokens = calculateContextTokens(assistant.usage);
-						if (contextTokens > 0) {
-							hasPostCompactionUsage = true;
-						}
-						break;
-					}
-				}
-			}
-
-			if (!hasPostCompactionUsage) {
-				return { tokens: null, contextWindow, percent: null };
+		const compactionIndex = latestCompaction ? branchEntries.lastIndexOf(latestCompaction) : -1;
+		let authoritative: AssistantMessage | undefined;
+		let authoritativeEntryIndex = -1;
+		let hasValidPostCompactionAssistant = false;
+		for (let i = branchEntries.length - 1; i > compactionIndex; i--) {
+			const entry = branchEntries[i];
+			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+			const assistant = entry.message;
+			if (assistant.stopReason === "aborted" || assistant.stopReason === "error") continue;
+			hasValidPostCompactionAssistant = true;
+			if (assistant.usage.contextTokens !== undefined) {
+				authoritative = assistant;
+				authoritativeEntryIndex = i;
+				break;
 			}
 		}
-
+		const contextWindow = authoritative?.usage.contextMaxTokens ?? model.contextWindow ?? 0;
+		if (contextWindow <= 0) return undefined;
+		if (authoritative) {
+			const trailingMessages = branchEntries
+				.slice(authoritativeEntryIndex + 1)
+				.filter(
+					(entry): entry is SessionMessageEntry =>
+						entry.type === "message" &&
+						(entry.message.role !== "assistant" ||
+							(entry.message.stopReason !== "error" && entry.message.stopReason !== "aborted")),
+				)
+				.map((entry) => entry.message);
+			const trailing = estimateContextTokens(trailingMessages).tokens;
+			const tokens = authoritative.usage.contextTokens! + trailing;
+			return { tokens, contextWindow, percent: (tokens / contextWindow) * 100 };
+		}
+		if (latestCompaction && !hasValidPostCompactionAssistant) {
+			return { tokens: null, contextWindow, percent: null };
+		}
 		const estimate = estimateContextTokens(this.messages);
-		const percent = (estimate.tokens / contextWindow) * 100;
-
-		return {
-			tokens: estimate.tokens,
-			contextWindow,
-			percent,
-		};
+		return { tokens: estimate.tokens, contextWindow, percent: (estimate.tokens / contextWindow) * 100 };
 	}
 
 	/** RLM session dir holding sub-* child sessions, without creating directories. */

@@ -1,11 +1,3 @@
-// Cursor protocol schema derived from Oh My Pi (OMP) commit
-// 45e12e5bb758198a920c6070e7e64cb33b21beac and refreshed against the
-// official Cursor Agent CLI v2026.08.11-e8db854 descriptor.
-// OMP-derived portions are MIT licensed; Copyright (c) 2025-2026 Can Bölük.
-// Cursor's schema provenance is identified here without asserting a Cursor license.
-// InteractionQuery fields 9-14 (Cursor CLI v2026.08.04) are transcribed from the shipped
-// CLI's embedded descriptor; the bridge answers them with typed rejections in index.ts.
-
 syntax = "proto3";
 
 package agent.v1;
@@ -623,51 +615,9 @@ message ConversationSummaryArchive {
    bytes summary_message = 4;
 }
 
-message PromptTokenBreakdownCategory {
-   string id = 1;
-   string label = 2;
-   uint32 estimated_tokens = 3;
-   optional uint32 character_count = 4;
-}
-
-message PromptTokenBreakdownSnapshot {
-   uint32 total_used_tokens = 1;
-   uint32 max_tokens = 2;
-   repeated PromptTokenBreakdownCategory categories = 3;
-}
-
-message PromptContextSourceRef {
-   string source_type = 1;
-   uint32 message_index = 3;
-   string content_path = 4;
-   uint32 start_offset = 5;
-   uint32 end_offset = 6;
-}
-
-message PromptContextNode {
-   string id = 1;
-   optional string parent_id = 2;
-   string kind = 3;
-   string label = 4;
-   string category_id = 5;
-   uint32 estimated_tokens = 6;
-   uint32 character_count = 7;
-   bool content_available = 9;
-   optional PromptContextSourceRef source = 11;
-   optional string inline_content = 12;
-}
-
-message PromptContextUsageTree {
-   uint32 schema_version = 1;
-   repeated PromptContextNode nodes = 2;
-}
-
 message ConversationTokenDetails {
    uint32 used_tokens = 1;
    uint32 max_tokens = 2;
-   optional PromptTokenBreakdownSnapshot breakdown = 3;
-   optional PromptContextUsageTree prompt_context_usage_tree = 4;
-   optional bytes prompt_context_usage_snapshot_blob_id = 5;
 }
 
 message FileState {
@@ -791,28 +741,12 @@ message RequestedModel {
       AzureCredentials azure_credentials = 5;
       BedrockCredentials bedrock_credentials = 6;
    }
-   bool built_in_model = 7;
-   bool is_variant_string_representation = 8;
 }
 
 message RequestedModel_ModelParameterbytes {
    string id = 1;
    // All paramters are encoded as strings. For boolean parameters, the value is either "true" or "false". For enum parameters, the value is one of the values in the enum.
    string value = 2;
-}
-
-message SubagentModelOverride {
-   string subagent_type = 1;
-   oneof selection {
-      RequestedModel model = 2;
-      bool inherit = 3;
-      bool disabled = 4;
-   }
-}
-
-message PreFetchedBlob {
-   bytes id = 1;
-   bytes value = 2;
 }
 
 message AgentRunRequest {
@@ -828,30 +762,10 @@ message AgentRunRequest {
    optional SkillOptions skill_options = 7;
    // Custom system prompt override. Allowlisted for specific teams only.
    optional string custom_system_prompt = 8;
-   optional bool suggest_next_prompt = 10;
-   optional string subagent_type_name = 11;
-   optional bool exclude_workspace_context = 12;
-   optional string harness = 13;
-   repeated RequestedModel selected_subagent_models = 14;
-   repeated ModelDetails selected_subagent_model_details = 15;
-   optional string conversation_group_id = 16;
-   repeated PreFetchedBlob pre_fetched_blobs = 17;
-   optional string dev_raw_model_slug = 18;
-   optional bool client_supports_inline_images = 19;
-   repeated SubagentModelOverride subagent_model_overrides = 20;
-   optional bool can_create_cloud_subagents = 21;
-   optional bool suppress_subagent_progress_update_tool = 22;
-   optional bool client_supports_send_to_user = 23;
-   optional string computer_use_coordinate_mode = 24;
-   optional string run_id = 25;
-   optional string agent_session_id = 26;
-   optional bool client_supports_prompt_context_usage_rpc = 27;
-   optional bool client_supports_routed_model_update = 28;
 }
 
 message TextDeltaUpdate {
    string text = 1;
-   bool is_server_notice = 2;
 }
 
 message ToolCallStartedUpdate {
@@ -919,6 +833,9 @@ message ShellOutputDeltaUpdate {
    }
 }
 
+// Independently specified wire extension used by this provider. These five
+// scalar counters are factual terminal field declarations observed by the
+// project; no other declaration in this file is copied from Cursor software.
 message TurnEndedUpdate {
    optional int64 input_tokens = 1;
    optional int64 output_tokens = 2;
@@ -941,19 +858,6 @@ message StepCompletedUpdate {
    int64 step_duration_ms = 2;
 }
 
-message PromptSuggestionUpdate { string suggestion = 1; }
-message PostRequestPromptUpdate {
-   string title = 1;
-   string message = 2;
-   string button_label = 3;
-   string button_url = 4;
-}
-message ActiveBranchChange { string path = 1; string branch_name = 2; }
-message FeedbackRequestUpdate { string request_id = 1; string canonical_model_name = 2; }
-message ResponseComparisonUpdate { string comparison_id = 1; }
-message ContextInjectionStateUpdate { string injection_id = 1; }
-message RoutedModelUpdate { string display_name = 1; }
-
 message InteractionUpdate {
    oneof message {
       TextDeltaUpdate text_delta = 1;
@@ -973,13 +877,6 @@ message InteractionUpdate {
       TurnEndedUpdate turn_ended = 14;
       StepStartedUpdate step_started = 16;
       StepCompletedUpdate step_completed = 17;
-      PromptSuggestionUpdate prompt_suggestion = 18;
-      PostRequestPromptUpdate post_request_prompt = 19;
-      ActiveBranchChange active_branch_change = 20;
-      FeedbackRequestUpdate feedback_request = 21;
-      ResponseComparisonUpdate response_comparison = 22;
-      ContextInjectionStateUpdate context_injection_state = 23;
-      RoutedModelUpdate routed_model = 24;
    }
 }
 
@@ -990,20 +887,10 @@ message InteractionQuery {
       WebSearchRequestQuery web_search_request_query = 2;
       AskQuestionInteractionQuery ask_question_interaction_query = 3;
       SwitchModeRequestQuery switch_mode_request_query = 4;
-      // Removed from the Cursor CLI schema by v2026.08.04; retained so a peer
-      // built on the older baseline still decodes a typed rejection.
       ExaSearchRequestQuery exa_search_request_query = 5;
       ExaFetchRequestQuery exa_fetch_request_query = 6;
       CreatePlanRequestQuery create_plan_request_query = 7;
       SetupVmEnvironmentArgs setup_vm_environment_args = 8;
-      // Fields 9-14: Cursor CLI v2026.08.04, transcribed from the shipped
-      // CLI's embedded descriptor.
-      WebFetchRequestQuery web_fetch_request_query = 9;
-      PrManagementRequestQuery pr_management_request_query = 10;
-      McpAuthRequestQuery mcp_auth_request_query = 11;
-      GenerateImageRequestQuery generate_image_request_query = 12;
-      ReplaceEnvArgs replace_env_args = 13;
-      ConnectScmRequestQuery connect_scm_request_query = 14;
    }
 }
 
@@ -1017,12 +904,6 @@ message InteractionResponse {
       ExaFetchRequestResponse exa_fetch_request_response = 6;
       CreatePlanRequestResponse create_plan_request_response = 7;
       SetupVmEnvironmentResult setup_vm_environment_result = 8;
-      WebFetchRequestResponse web_fetch_request_response = 9;
-      PrManagementResult pr_management_result = 10;
-      McpAuthRequestResponse mcp_auth_request_response = 11;
-      GenerateImageRequestResponse generate_image_request_response = 12;
-      ReplaceEnvResult replace_env_result = 13;
-      ConnectScmRequestResponse connect_scm_request_response = 14;
    }
 }
 
@@ -1033,263 +914,6 @@ message AskQuestionInteractionQuery {
 
 message AskQuestionInteractionResponse {
    AskQuestionResult result = 1;
-}
-
-// Cursor CLI v2026.08.04 interaction query families (InteractionQuery fields
-// 9-14), transcribed from the shipped CLI's embedded descriptor. Nested type
-// names match the descriptor exactly (e.g. agent.v1.WebFetchRequestResponse.Rejected).
-
-message WebFetchRequestQuery {
-   WebFetchArgs args = 1;
-   bool skip_approval = 2;
-   SmartModeApproval smart_mode_approval = 3;
-}
-
-message WebFetchArgs {
-   string url = 1;
-   string tool_call_id = 2;
-}
-
-message WebFetchRequestResponse {
-   oneof result {
-      Approved approved = 1;
-      Rejected rejected = 2;
-   }
-
-   message Approved {
-   }
-
-   message Rejected {
-      string reason = 1;
-   }
-}
-
-message PrManagementRequestQuery {
-   PrManagementArgs args = 1;
-}
-
-message PrManagementArgs {
-   string tool_call_id = 1;
-   oneof action {
-      CreatePrAction create_pr = 2;
-      UpdatePrAction update_pr = 3;
-      PostCommentAction post_comment = 4;
-      ResolveCommentAction resolve_comment = 5;
-      GetCiStatusAction get_ci_status = 6;
-      SetPrStatusAction set_pr_status = 7;
-   }
-}
-
-message CreatePrAction {
-   string title = 1;
-   string body = 2;
-   optional string base_branch = 3;
-   optional bool draft = 4;
-   string branch_name = 5;
-   repeated string add_labels = 6;
-   optional string repo_url = 7;
-   optional bool skip_branch_prefix_check = 8;
-   optional int64 stack_on_pr_number = 9;
-}
-
-message UpdatePrAction {
-   optional string pr_url = 1;
-   optional string title = 2;
-   optional string body = 3;
-   optional string base_branch = 4;
-   optional string branch_name = 5;
-   repeated string add_labels = 6;
-   repeated string remove_labels = 7;
-   optional string repo_url = 8;
-   optional int64 stack_on_pr_number = 9;
-   optional bool clear_stack = 10;
-   optional bool draft = 11;
-}
-
-message PostCommentAction {
-   optional string pr_url = 1;
-   optional string branch_name = 2;
-   string body = 3;
-   optional string repo_url = 4;
-   optional int64 in_reply_to = 5;
-   optional string path = 6;
-   optional int32 line = 7;
-   optional int32 start_line = 8;
-   optional string side = 9;
-   optional string reply_to_reference = 10;
-}
-
-message ResolveCommentAction {
-   optional string pr_url = 1;
-   optional string branch_name = 2;
-   int64 comment_id = 3;
-   optional string repo_url = 4;
-   optional string comment_reference = 5;
-}
-
-message GetCiStatusAction {
-   optional string pr_url = 1;
-   optional string branch_name = 2;
-   optional string repo_url = 3;
-}
-
-message SetPrStatusAction {
-   optional string pr_url = 1;
-   optional string branch_name = 2;
-   optional string repo_url = 3;
-   PullRequestStatus status = 4;
-}
-
-enum PullRequestStatus {
-   PULL_REQUEST_STATUS_UNSPECIFIED = 0;
-   PULL_REQUEST_STATUS_OPEN = 1;
-   PULL_REQUEST_STATUS_CLOSED = 2;
-}
-
-message PrManagementResult {
-   oneof result {
-      PrManagementSuccess success = 1;
-      PrManagementError error = 2;
-      PrManagementRejected rejected = 3;
-      PrManagementRegistered registered = 4;
-      PrManagementNeedsConfirmation needs_confirmation = 5;
-   }
-}
-
-message PrManagementSuccess {
-   string pr_url = 1;
-   int32 pr_number = 2;
-   string message = 3;
-}
-
-message PrManagementError {
-   string error = 1;
-}
-
-message PrManagementRejected {
-   string reason = 1;
-}
-
-message PrManagementRegistered {
-   string message = 1;
-   string title = 2;
-   string body = 3;
-   optional string base_branch = 4;
-   optional bool draft = 5;
-   string branch_name = 6;
-}
-
-message PrManagementNeedsConfirmation {
-   string message = 1;
-   string discovered_pr_url = 2;
-   int32 discovered_pr_number = 3;
-   string discovered_pr_title = 4;
-   string branch_name = 5;
-}
-
-message McpAuthRequestQuery {
-   McpAuthArgs args = 1;
-}
-
-message McpAuthArgs {
-   string server_identifier = 1;
-   string tool_call_id = 2;
-}
-
-message McpAuthRequestResponse {
-   oneof result {
-      Approved approved = 1;
-      Rejected rejected = 2;
-   }
-
-   message Approved {
-   }
-
-   message Rejected {
-      string reason = 1;
-   }
-}
-
-message GenerateImageRequestQuery {
-   GenerateImageArgs args = 1;
-   string tool_call_id = 2;
-}
-
-message GenerateImageRequestResponse {
-   oneof result {
-      Approved approved = 1;
-      Rejected rejected = 2;
-   }
-
-   message Approved {
-      string description = 1;
-   }
-
-   message Rejected {
-      string reason = 1;
-   }
-}
-
-message ReplaceEnvArgs {
-   ReplaceEnvConfig config = 1;
-   ReplaceEnvMode mode = 2;
-   repeated RepoCheckoutRefOverride checkout_ref_overrides = 3;
-}
-
-message ReplaceEnvConfig {
-   string install_script = 1;
-   string dockerfile_contents = 2;
-}
-
-enum ReplaceEnvMode {
-   REPLACE_ENV_MODE_UNSPECIFIED = 0;
-   REPLACE_ENV_MODE_CUSTOM = 1;
-   REPLACE_ENV_MODE_CLEAN_SLATE = 2;
-   REPLACE_ENV_MODE_DEFAULT = 3;
-}
-
-message RepoCheckoutRefOverride {
-   string repo_url = 1;
-   string ref = 2;
-}
-
-message ReplaceEnvResult {
-   oneof result {
-      ReplaceEnvSuccess success = 1;
-      ReplaceEnvFailure failure = 2;
-   }
-}
-
-message ReplaceEnvSuccess {
-   string setup_logs = 1;
-}
-
-message ReplaceEnvFailure {
-   string error_message = 1;
-   string setup_logs = 2;
-}
-
-message ConnectScmRequestQuery {
-   ConnectScmArgs args = 1;
-}
-
-message ConnectScmRequestResponse {
-   oneof result {
-      Approved approved = 1;
-      Rejected rejected = 2;
-      Failed failed = 3;
-   }
-
-   message Approved {
-   }
-
-   message Rejected {
-      string reason = 1;
-   }
-
-   message Failed {
-      string error = 1;
-   }
 }
 
 message ClientHeartbeat {
@@ -1333,14 +957,6 @@ message AgentClientMessage {
    }
 }
 
-message TtftBreakdown {
-   double server_first_token_ms = 1;
-   double pre_stream_setup_ms = 2;
-   double wait_for_first_event_ms = 3;
-   optional double provider_ttft_ms = 4;
-   double slow_pool_wait_ms = 5;
-}
-
 message AgentServerMessage {
    oneof message {
       InteractionUpdate interaction_update = 1;
@@ -1349,7 +965,6 @@ message AgentServerMessage {
       ConversationStateStructure conversation_checkpoint_update = 3;
       KvServerMessage kv_server_message = 4;
       InteractionQuery interaction_query = 7;
-      TtftBreakdown ttft_breakdown = 8;
    }
 }
 
@@ -2226,7 +1841,6 @@ message GenerateImageArgs {
    optional string file_path = 2;
    // Optional paths to reference images to use as input for image-to-image generation
    repeated string reference_image_paths = 5;
-   optional string aspect_ratio = 6;
 }
 
 message GenerateImageResult {

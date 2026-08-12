@@ -1,8 +1,7 @@
 @earendil-works/pi-ai
 =====================
 
-This package contains files derived from Oh My Pi (OMP) and from the
-Cursor Agent CLI protocol schema baseline preserved in OMP:
+This package contains MIT-licensed portions derived from Oh My Pi (OMP):
 
   - src/providers/cursor-not-cloud/agent.proto
   - src/providers/cursor-not-cloud/agent_pb.ts (generated from agent.proto)
@@ -12,14 +11,16 @@ Cursor Agent CLI protocol schema baseline preserved in OMP:
   - src/providers/cursor-not-cloud/exec-modern.ts (OMP-derived portions)
   - src/utils/cursor-not-cloud-blocks.ts (OMP-derived portions)
 
-These files ship in compiled form under dist/.
+The protobuf baseline is the exact agent.proto from Oh My Pi tag v17.2.15,
+commit 06aecdd51f07e689e970ceaa180abe2be0c14bbb. OMP is MIT licensed;
+Copyright (c) 2025-2026 Can Bölük.
 
-OMP-derived portions are MIT licensed; Copyright (c) 2025-2026 Can Bölük.
-The Cursor schema baseline was preserved from OMP commit
-45e12e5bb758198a920c6070e7e64cb33b21beac and refreshed against the
-installed official Cursor Agent CLI v2026.08.11-e8db854 descriptor.
-This provenance statement does not assert that Cursor publishes the
-schema under MIT.
+Prime Agent independently specifies one small factual wire extension to that
+MIT baseline: TurnEndedUpdate fields 1-5, the optional int64 input, output,
+cache-read, cache-write, and reasoning token counters. No schema declaration
+copied or refreshed from an installed Cursor binary is distributed here. This
+notice makes no claim about Cursor software licensing.
 
-The complete MIT license text, including the OMP copyright notice, is
-provided in the LICENSE file distributed with this package.
+These files ship in compiled form under dist/. The complete MIT license text,
+including the OMP copyright notice, is provided in the LICENSE file distributed
+with this package.

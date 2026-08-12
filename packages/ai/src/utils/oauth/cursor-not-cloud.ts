@@ -89,16 +89,51 @@ function abortError(): Error {
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 	if (signal?.aborted) return Promise.reject(abortError());
 	return new Promise((resolve, reject) => {
-		const timer = setTimeout(resolve, ms);
-		signal?.addEventListener(
-			"abort",
-			() => {
-				clearTimeout(timer);
-				reject(abortError());
-			},
-			{ once: true },
-		);
+		const cleanup = () => signal?.removeEventListener("abort", onAbort);
+		const timer = setTimeout(() => {
+			cleanup();
+			resolve();
+		}, ms);
+		const onAbort = () => {
+			clearTimeout(timer);
+			cleanup();
+			reject(abortError());
+		};
+		signal?.addEventListener("abort", onAbort, { once: true });
 	});
+}
+
+async function readBoundedPollJson(response: Response, maxBytes = 64 * 1024): Promise<unknown> {
+	if (!response.body) throw new Error("Cursor authentication response was empty");
+	const reader = response.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			if (!value) continue;
+			total += value.byteLength;
+			if (total > maxBytes) {
+				await reader.cancel("Cursor authentication response exceeded limit");
+				throw new Error("Cursor authentication response was too large");
+			}
+			chunks.push(value);
+		}
+	} finally {
+		reader.releaseLock();
+	}
+	const bytes = new Uint8Array(total);
+	let offset = 0;
+	for (const chunk of chunks) {
+		bytes.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	try {
+		return JSON.parse(new TextDecoder().decode(bytes));
+	} catch {
+		throw new Error("Cursor authentication response was malformed");
+	}
 }
 
 export async function generateCursorAuthParams(): Promise<{
@@ -134,7 +169,14 @@ export async function pollCursorAuth(
 				continue;
 			}
 			if (!response.ok) throw new Error(`Cursor authentication poll failed with HTTP ${response.status}`);
-			const payload = (await response.json()) as { accessToken?: unknown; refreshToken?: unknown };
+			const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+			if (contentType !== "application/json") {
+				throw new Error("Cursor authentication response had an unsupported content type");
+			}
+			const payload = (await readBoundedPollJson(response)) as {
+				accessToken?: unknown;
+				refreshToken?: unknown;
+			};
 			if (typeof payload.accessToken !== "string" || typeof payload.refreshToken !== "string") {
 				throw new Error("Cursor authentication response is missing tokens");
 			}

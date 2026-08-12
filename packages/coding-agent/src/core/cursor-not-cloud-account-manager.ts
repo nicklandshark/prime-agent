@@ -42,19 +42,43 @@ function readMatchingOfficialCachedEmail(authId: string | undefined): string | u
 	}
 }
 
-/** Small identity cache keyed by the exact active auth value fingerprint. */
+/** Small bounded identity cache keyed by the exact active auth value fingerprint. */
 export class CursorNotCloudAccountManager {
 	private readonly cache = new Map<string, IdentityCacheEntry>();
-	private readonly pending = new Map<string, Promise<void>>();
-	private activeFingerprint?: string;
+	private readonly pending = new Map<
+		string,
+		{ promise: Promise<void>; controller: AbortController; generation: number }
+	>();
+	private nextGeneration = 0;
+	private readonly maxEntries = 16;
+
+	private safeLabel(value: string | undefined): string | undefined {
+		if (!value) return undefined;
+		const sanitized = value.replace(/[\x00-\x1f\x7f-\x9f]/g, "").trim();
+		return sanitized.length > 0 ? sanitized.slice(0, 320) : undefined;
+	}
+
+	private setCache(fingerprint: string, entry: IdentityCacheEntry): void {
+		this.cache.delete(fingerprint);
+		this.cache.set(fingerprint, entry);
+		while (this.cache.size > this.maxEntries) {
+			const oldest = this.cache.keys().next().value;
+			if (oldest === undefined) break;
+			this.cache.delete(oldest);
+			this.pending.get(oldest)?.controller.abort();
+			this.pending.delete(oldest);
+		}
+	}
 
 	observeCredential(apiKey: string, sourceToken: { valueFingerprint: string }, baseUrl?: string): void {
 		const fingerprint = sourceToken.valueFingerprint;
-		this.activeFingerprint = fingerprint;
-		if (!this.cache.has(fingerprint)) {
-			const subject = readJwtSubject(apiKey);
-			const cachedEmail = readMatchingOfficialCachedEmail(subject);
-			this.cache.set(fingerprint, {
+		const existing = this.cache.get(fingerprint);
+		if (existing) {
+			this.setCache(fingerprint, existing);
+		} else {
+			const subject = this.safeLabel(readJwtSubject(apiKey));
+			const cachedEmail = this.safeLabel(readMatchingOfficialCachedEmail(subject));
+			this.setCache(fingerprint, {
 				label: cachedEmail ?? shortenStableId(subject) ?? "Cursor subscription",
 				...(cachedEmail ? { email: cachedEmail } : {}),
 				...(subject ? { authId: subject } : {}),
@@ -64,44 +88,59 @@ export class CursorNotCloudAccountManager {
 		const cached = this.cache.get(fingerprint);
 		if (cached?.refreshedAt && Date.now() - cached.refreshedAt < IDENTITY_TTL_MS) return;
 		if (this.pending.has(fingerprint)) return;
+		const controller = new AbortController();
+		const generation = ++this.nextGeneration;
 		const request = (async () => {
 			try {
 				const { fetchCursorAccountIdentity } = await import("@earendil-works/pi-ai/cursor-not-cloud");
-				const identity = await fetchCursorAccountIdentity(apiKey, { baseUrl, timeoutMs: 5_000 });
-				const authId = identity.authId ?? readJwtSubject(apiKey);
-				const matchingCachedEmail = readMatchingOfficialCachedEmail(authId);
-				this.cache.set(fingerprint, {
-					label: identity.email ?? matchingCachedEmail ?? shortenStableId(authId) ?? "Cursor subscription",
-					...(identity.email || matchingCachedEmail ? { email: identity.email ?? matchingCachedEmail } : {}),
+				if (controller.signal.aborted) return;
+				const identity = await fetchCursorAccountIdentity(apiKey, {
+					baseUrl,
+					timeoutMs: 5_000,
+					signal: controller.signal,
+				});
+				const current = this.pending.get(fingerprint);
+				if (!current || current.generation !== generation || controller.signal.aborted) return;
+				const authId = this.safeLabel(identity.authId ?? readJwtSubject(apiKey));
+				const email = this.safeLabel(identity.email);
+				const matchingCachedEmail = this.safeLabel(readMatchingOfficialCachedEmail(authId));
+				const displayEmail = email ?? matchingCachedEmail;
+				this.setCache(fingerprint, {
+					label: displayEmail ?? shortenStableId(authId) ?? "Cursor subscription",
+					...(displayEmail ? { email: displayEmail } : {}),
 					...(authId ? { authId } : {}),
 					refreshedAt: Date.now(),
 				});
 			} catch {
 				// Keep only the fingerprint-bound safe fallback; never reuse another credential's identity.
 			}
-		})().finally(() => this.pending.delete(fingerprint));
-		this.pending.set(fingerprint, request);
+		})().finally(() => {
+			const current = this.pending.get(fingerprint);
+			if (current?.generation === generation) this.pending.delete(fingerprint);
+		});
+		this.pending.set(fingerprint, { promise: request, controller, generation });
 	}
 
 	getDisplayLabel(sourceToken: { valueFingerprint: string } | undefined): string | undefined {
-		if (!sourceToken || sourceToken.valueFingerprint !== this.activeFingerprint) return undefined;
-		return this.cache.get(sourceToken.valueFingerprint)?.label ?? "Cursor subscription";
+		if (!sourceToken) return undefined;
+		const entry = this.cache.get(sourceToken.valueFingerprint);
+		if (!entry) return "Cursor subscription";
+		this.setCache(sourceToken.valueFingerprint, entry);
+		return entry.label;
 	}
 
 	invalidate(sourceToken?: { valueFingerprint: string }): void {
-		if (sourceToken) {
-			this.cache.delete(sourceToken.valueFingerprint);
-			this.pending.delete(sourceToken.valueFingerprint);
-			if (this.activeFingerprint === sourceToken.valueFingerprint) this.activeFingerprint = undefined;
-			return;
-		}
-		this.activeFingerprint = undefined;
+		if (!sourceToken) return;
+		const fingerprint = sourceToken.valueFingerprint;
+		this.pending.get(fingerprint)?.controller.abort();
+		this.pending.delete(fingerprint);
+		this.cache.delete(fingerprint);
 	}
 
 	clear(): void {
+		for (const entry of this.pending.values()) entry.controller.abort();
 		this.cache.clear();
 		this.pending.clear();
-		this.activeFingerprint = undefined;
 	}
 }
 

@@ -2,7 +2,7 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import type { RlmChildAgentStatus } from "./agent-session.js";
-import { calculateContextTokens, estimateContextTokens } from "./compaction/index.js";
+import { estimateContextTokens } from "./compaction/index.js";
 import type { ContextUsage } from "./extensions/index.js";
 import { buildSessionContext, type FileEntry, loadEntriesFromFile, type SessionEntry } from "./session-manager.js";
 import { addAssistantUsage, cloneUsage, emptyUsage, subtractAssistantUsage } from "./usage.js";
@@ -111,10 +111,6 @@ function computeContextUsageFromEntries(
 	branch: SessionEntry[],
 	contextWindow: number | undefined,
 ): ContextUsage | undefined {
-	if (!contextWindow || contextWindow <= 0) {
-		return undefined;
-	}
-
 	let latestCompactionIndex = -1;
 	for (let i = branch.length - 1; i >= 0; i--) {
 		if (branch[i].type === "compaction") {
@@ -122,33 +118,45 @@ function computeContextUsageFromEntries(
 			break;
 		}
 	}
-
-	if (latestCompactionIndex >= 0) {
-		let hasPostCompactionUsage = false;
-		for (let i = branch.length - 1; i > latestCompactionIndex; i--) {
-			const entry = branch[i];
-			if (!isAssistantEntry(entry)) {
-				continue;
-			}
-			const assistant = entry.message;
-			if (assistant.stopReason === "aborted" || assistant.stopReason === "error") {
-				continue;
-			}
-			if (calculateContextTokens(assistant.usage) > 0) {
-				hasPostCompactionUsage = true;
-			}
+	let authoritative: AssistantMessage | undefined;
+	let authoritativeIndex = -1;
+	let hasValidPostCompactionAssistant = false;
+	for (let i = branch.length - 1; i > latestCompactionIndex; i--) {
+		const entry = branch[i];
+		if (!isAssistantEntry(entry)) continue;
+		if (entry.message.stopReason === "aborted" || entry.message.stopReason === "error") continue;
+		hasValidPostCompactionAssistant = true;
+		if (entry.message.usage.contextTokens !== undefined) {
+			authoritative = entry.message;
+			authoritativeIndex = i;
 			break;
 		}
-		if (!hasPostCompactionUsage) {
-			return { tokens: null, contextWindow, percent: null };
-		}
 	}
-
+	const effectiveWindow = authoritative?.usage.contextMaxTokens ?? contextWindow;
+	if (!effectiveWindow || effectiveWindow <= 0) return undefined;
+	if (authoritative) {
+		const trailingMessages = branch
+			.slice(authoritativeIndex + 1)
+			.filter(
+				(entry): entry is SessionEntry & { type: "message" } =>
+					entry.type === "message" &&
+					(entry.message.role !== "assistant" ||
+						(entry.message.stopReason !== "error" && entry.message.stopReason !== "aborted")),
+			)
+			.map((entry) => entry.message);
+		const tokens = authoritative.usage.contextTokens! + estimateContextTokens(trailingMessages).tokens;
+		return { tokens, contextWindow: effectiveWindow, percent: (tokens / effectiveWindow) * 100 };
+	}
+	if (latestCompactionIndex >= 0 && !hasValidPostCompactionAssistant) {
+		return { tokens: null, contextWindow: effectiveWindow, percent: null };
+	}
 	const estimate = estimateContextTokens(buildSessionContext(allEntries).messages);
-	if (estimate.tokens <= 0) {
-		return undefined;
-	}
-	return { tokens: estimate.tokens, contextWindow, percent: (estimate.tokens / contextWindow) * 100 };
+	if (estimate.tokens <= 0) return undefined;
+	return {
+		tokens: estimate.tokens,
+		contextWindow: effectiveWindow,
+		percent: (estimate.tokens / effectiveWindow) * 100,
+	};
 }
 
 function sessionEntriesFromFile(file: string): SessionEntry[] {

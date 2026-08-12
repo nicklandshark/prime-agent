@@ -80,11 +80,12 @@
 		"clean": "shx rm -rf dist",
 		"generate-models": "npx tsx scripts/generate-models.ts",
 		"generate-cursor-not-cloud-proto": "buf generate src/providers/cursor-not-cloud/agent.proto --template buf.gen.yaml && node scripts/normalize-cursor-not-cloud-proto.mjs",
-		"build": "npm run generate-models && npm run generate-cursor-not-cloud-proto && tsgo -p tsconfig.build.json",
+		"build": "npm run generate-cursor-not-cloud-model && npm run generate-cursor-not-cloud-proto && tsgo -p tsconfig.build.json",
 		"dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
 		"dev:tsc": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
 		"test": "vitest --run",
-		"prepublishOnly": "npm run clean && npm run build"
+		"prepublishOnly": "npm run clean && npm run build",
+		"generate-cursor-not-cloud-model": "npx tsx scripts/generate-cursor-not-cloud-model.ts"
 	},
 	"dependencies": {
 		"@anthropic-ai/sdk": "^0.91.1",

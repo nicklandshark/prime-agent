@@ -141,7 +141,9 @@ export async function connectProxiedSocket(
 		let tunnelSocket: tls.TLSSocket | undefined;
 		let timer: NodeJS.Timeout | undefined;
 		let settled = false;
-		let response = Buffer.alloc(0);
+		const responseChunks: Buffer[] = [];
+		let responseBytes = 0;
+		let delimiterTail = Buffer.alloc(0);
 		const cleanup = () => {
 			if (timer) clearTimeout(timer);
 			options.signal?.removeEventListener("abort", onAbort);
@@ -162,31 +164,52 @@ export async function connectProxiedSocket(
 		};
 		const onAbort = () => fail(new Error("Proxy tunnel aborted"));
 		const onProxyData = (chunk: Buffer) => {
-			if (!rawSocket) return;
-			response = Buffer.concat([response, chunk]);
-			const headerEnd = response.indexOf("\r\n\r\n");
-			if (headerEnd < 0) return;
-			rawSocket.off("data", onProxyData);
-			const statusLine = response.subarray(0, headerEnd).toString("latin1").split("\r\n", 1)[0];
-			if (!/^HTTP\/1\.[01] 200(?: |$)/.test(statusLine)) {
-				fail(new Error(`Proxy tunnel failed: ${statusLine}`));
-				return;
+			try {
+				if (!rawSocket) return;
+				responseBytes += chunk.byteLength;
+				if (responseBytes > 64 * 1024) {
+					fail(new Error("Proxy CONNECT response header exceeded 64 KiB"));
+					return;
+				}
+				responseChunks.push(chunk);
+				const scan = delimiterTail.length > 0 ? Buffer.concat([delimiterTail, chunk]) : chunk;
+				const localEnd = scan.indexOf("\r\n\r\n");
+				delimiterTail = Buffer.from(scan.subarray(Math.max(0, scan.length - 3)));
+				if (localEnd < 0) return;
+				rawSocket.off("data", onProxyData);
+				const response = Buffer.concat(responseChunks, responseBytes);
+				const headerEnd = response.indexOf("\r\n\r\n");
+				if (headerEnd < 0) {
+					fail(new Error("Proxy CONNECT response header was malformed"));
+					return;
+				}
+				const statusLine = response.subarray(0, headerEnd).toString("latin1").split("\r\n", 1)[0];
+				if (!/^HTTP\/1\.[01] 200(?: |$)/.test(statusLine)) {
+					fail(new Error(`Proxy tunnel failed: ${statusLine}`));
+					return;
+				}
+				tunnelSocket = tls.connect({ socket: rawSocket, servername: targetHost, ALPNProtocols: ["h2"] });
+				tunnelSocket.once("secureConnect", succeed);
+				tunnelSocket.once("error", fail);
+			} catch (error) {
+				fail(error instanceof Error ? error : new Error(String(error)));
 			}
-			tunnelSocket = tls.connect({ socket: rawSocket, servername: targetHost, ALPNProtocols: ["h2"] });
-			tunnelSocket.once("secureConnect", succeed);
-			tunnelSocket.once("error", fail);
 		};
 		const onProxyReady = () => {
-			if (!rawSocket) return;
-			let request = `CONNECT ${targetHost}:${targetPort} HTTP/1.1\r\nHost: ${targetHost}:${targetPort}\r\n`;
-			if (proxyUrl.username || proxyUrl.password) {
-				const credentials = Buffer.from(
-					`${decodeURIComponent(proxyUrl.username)}:${decodeURIComponent(proxyUrl.password)}`,
-				).toString("base64");
-				request += `Proxy-Authorization: Basic ${credentials}\r\n`;
+			try {
+				if (!rawSocket) return;
+				let request = `CONNECT ${targetHost}:${targetPort} HTTP/1.1\r\nHost: ${targetHost}:${targetPort}\r\n`;
+				if (proxyUrl.username || proxyUrl.password) {
+					const credentials = Buffer.from(
+						`${decodeURIComponent(proxyUrl.username)}:${decodeURIComponent(proxyUrl.password)}`,
+					).toString("base64");
+					request += `Proxy-Authorization: Basic ${credentials}\r\n`;
+				}
+				rawSocket.write(`${request}\r\n`);
+				rawSocket.on("data", onProxyData);
+			} catch (error) {
+				fail(error instanceof Error ? error : new Error(String(error)));
 			}
-			rawSocket.write(`${request}\r\n`);
-			rawSocket.on("data", onProxyData);
 		};
 
 		options.signal?.addEventListener("abort", onAbort, { once: true });

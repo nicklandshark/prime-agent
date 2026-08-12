@@ -1,5 +1,5 @@
 // Portions of this provider are derived from Oh My Pi (OMP), MIT licensed.
-// Source revision: https://github.com/can1357/oh-my-pi/commit/45e12e5bb758198a920c6070e7e64cb33b21beac
+// Source revision: https://github.com/can1357/oh-my-pi/commit/06aecdd51f07e689e970ceaa180abe2be0c14bbb
 // Copyright (c) 2025-2026 Can Bölük. See the repository LICENSE.
 
 import { createHash } from "node:crypto";
@@ -49,6 +49,7 @@ import {
 	kStreamingPartialJson,
 } from "../../utils/cursor-not-cloud-blocks.js";
 import { AssistantMessageEventStream } from "../../utils/event-stream.js";
+import { recordStreamFailure } from "../../utils/stream-failure.js";
 import { buildBaseOptions } from "../simple-options.js";
 import type { ConversationStep, McpToolDefinition } from "./agent_pb.js";
 import {
@@ -70,8 +71,6 @@ import {
 	ClientHeartbeatSchema,
 	ComputerUseErrorSchema,
 	ComputerUseResultSchema,
-	ConnectScmRequestResponse_RejectedSchema,
-	ConnectScmRequestResponseSchema,
 	ConversationActionSchema,
 	ConversationSearchErrorSchema,
 	ConversationSearchResultSchema,
@@ -107,8 +106,6 @@ import {
 	ForceBackgroundShellStatus,
 	ForceBackgroundSubagentResultSchema,
 	ForceBackgroundSubagentStatus,
-	GenerateImageRequestResponse_RejectedSchema,
-	GenerateImageRequestResponseSchema,
 	GetBlobResultSchema,
 	GrepContentMatchSchema,
 	GrepContentResultSchema,
@@ -142,8 +139,6 @@ import {
 	McpAllowlistPrecheckResultSchema,
 	McpApprovedSchema,
 	McpArgsSchema,
-	McpAuthRequestResponse_RejectedSchema,
-	McpAuthRequestResponseSchema,
 	McpErrorSchema,
 	McpImageContentSchema,
 	McpRejectedSchema,
@@ -157,8 +152,6 @@ import {
 	McpToolResultContentItemSchema,
 	McpToolResultSchema,
 	ModelDetailsSchema,
-	PrManagementRejectedSchema,
-	PrManagementResultSchema,
 	ReadErrorSchema,
 	ReadMcpResourceErrorSchema,
 	type ReadMcpResourceExecResult,
@@ -170,8 +163,6 @@ import {
 	ReadSuccessSchema,
 	RecordScreenFailureSchema,
 	RecordScreenResultSchema,
-	ReplaceEnvFailureSchema,
-	ReplaceEnvResultSchema,
 	RequestContextResultSchema,
 	RequestContextSchema,
 	RequestContextSuccessSchema,
@@ -206,8 +197,6 @@ import {
 	UserMessageActionSchema,
 	UserMessageSchema,
 	WebFetchAllowlistPrecheckResultSchema,
-	WebFetchRequestResponse_RejectedSchema,
-	WebFetchRequestResponseSchema,
 	WebSearchRequestResponse_RejectedSchema,
 	WebSearchRequestResponseSchema,
 	WriteErrorSchema,
@@ -236,7 +225,7 @@ import {
 	shouldBypassProxy,
 	toolWireSchema,
 } from "./compat.js";
-import { validateCursorAgentRoute } from "./discovery.js";
+import { CURSOR_GROK_45_NORMAL_ROUTE_IDS, validateCursorAgentRoute } from "./discovery.js";
 import * as AIError from "./errors.js";
 import {
 	buildMcpStateResult,
@@ -267,9 +256,9 @@ import {
 	piTimeout,
 } from "./exec-modern.js";
 
-export { CURSOR_API_URL, CURSOR_CLIENT_VERSION, resolveCursorClientVersion } from "./config.js";
+export { CURSOR_API_URL, CURSOR_CLIENT_VERSION, normalizeCursorOrigin, resolveCursorClientVersion } from "./config.js";
 
-import { CURSOR_API_URL, resolveCursorClientVersion } from "./config.js";
+import { CURSOR_API_URL, normalizeCursorOrigin, resolveCursorClientVersion } from "./config.js";
 
 const CURSOR_PROXY_TUNNEL_TIMEOUT_MS = 30_000;
 
@@ -297,6 +286,7 @@ type CursorAgentStateLimits = { [K in keyof typeof CURSOR_AGENT_STATE_LIMITS]: n
 
 type CursorConversationEntry = {
 	id: string;
+	conversationId: string;
 	blobs: ManagedCursorBlobMap;
 	blobBytes: number;
 	state?: ConversationStateStructure;
@@ -386,7 +376,7 @@ export class CursorConversationStateStore {
 		return false;
 	}
 
-	private entry(conversationId: string, now: number): CursorConversationEntry {
+	private entry(conversationId: string, now: number, namespace = conversationId): CursorConversationEntry {
 		let entry = this.entries.get(conversationId);
 		if (entry) {
 			this.touch(entry, now);
@@ -402,6 +392,7 @@ export class CursorConversationStateStore {
 		}
 		entry = {
 			id: conversationId,
+			conversationId: namespace,
 			blobs: undefined as unknown as ManagedCursorBlobMap,
 			blobBytes: 0,
 			stateBytes: 0,
@@ -413,8 +404,8 @@ export class CursorConversationStateStore {
 		return entry;
 	}
 
-	acquire(conversationId: string, now = Date.now()): CursorConversationLease {
-		const entry = this.entry(conversationId, now);
+	acquire(conversationId: string, now = Date.now(), namespace = conversationId): CursorConversationLease {
+		const entry = this.entry(conversationId, now, namespace);
 		if (entry.activeLeases > 0) {
 			throw new CursorBlobCapacityError(
 				"Concurrent Cursor turns for the same authenticated conversation are not supported",
@@ -549,7 +540,7 @@ export class CursorConversationStateStore {
 	disposeConversationNamespace(conversationId: string): boolean {
 		let disposed = false;
 		for (const entry of [...this.entries.values()]) {
-			if (entry.id.endsWith(`:${conversationId}`) && entry.activeLeases === 0) {
+			if (entry.conversationId === conversationId && entry.activeLeases === 0) {
 				this.removeEntry(entry);
 				disposed = true;
 			}
@@ -589,9 +580,10 @@ export function getCursorAgentStateStats(): CursorConversationStateStats {
 
 export interface CursorAgentOptions extends StreamOptions {
 	customSystemPrompt?: string;
-	requestModelId?: string;
+	/** Prime reasoning request; always clamped to Cursor's low/medium/high product levels. */
+	reasoning?: ModelThinkingLevel;
 	conversationId?: string;
-	/** Header-safe schema/client override. Defaults to the bundled schema-matched pin. */
+	/** Header-safe schema/client override. Defaults to the bundled tested client pin. */
 	clientVersion?: string;
 	/** Test-only capability fixture; production requests discover routes from AgentService. */
 	discoveredModelIds?: ReadonlySet<string>;
@@ -632,6 +624,12 @@ function log(type: string, subtype?: string, data?: unknown): void {
 }
 
 function frameConnectMessage(data: Uint8Array, flags = 0): Buffer {
+	if (data.byteLength > MAX_CONNECT_FRAME_BYTES) {
+		throw new AIError.ProviderResponseError("Cursor outbound Connect frame exceeded 32 MiB", {
+			provider: "cursor-not-cloud",
+			kind: "oversized",
+		});
+	}
 	const frame = Buffer.alloc(5 + data.length);
 	frame[0] = flags;
 	frame.writeUInt32BE(data.length, 1);
@@ -646,7 +644,14 @@ function writeConnectMessage(stream: http2.ClientHttp2Stream, data: Uint8Array, 
 			kind: "transport",
 		});
 	}
-	const accepted = stream.write(frameConnectMessage(data, flags));
+	const frame = frameConnectMessage(data, flags);
+	if (stream.writableLength + frame.byteLength > MAX_CONNECT_PENDING_BYTES) {
+		throw new AIError.ProviderResponseError("Cursor stream backpressure exceeded the bounded write buffer", {
+			provider: "cursor-not-cloud",
+			kind: "backpressure",
+		});
+	}
+	const accepted = stream.write(frame);
 	if (!accepted && stream.writableLength > MAX_CONNECT_PENDING_BYTES) {
 		throw new AIError.ProviderResponseError("Cursor stream backpressure exceeded the bounded write buffer", {
 			provider: "cursor-not-cloud",
@@ -656,17 +661,32 @@ function writeConnectMessage(stream: http2.ClientHttp2Stream, data: Uint8Array, 
 }
 
 function parseConnectEndStream(data: Uint8Array): Error | null {
+	let payload: unknown;
 	try {
-		const payload = JSON.parse(new TextDecoder().decode(data));
-		const error = payload?.error;
-		if (error) {
-			const code = typeof error.code === "string" ? error.code : "unknown";
-			const message = typeof error.message === "string" ? error.message : "Unknown error";
-			return new AIError.ProviderResponseError(`Connect error ${code}: ${message}`, { kind: "envelope" });
-		}
-		return null;
+		payload = JSON.parse(new TextDecoder().decode(data));
 	} catch {
 		return new AIError.ProviderResponseError("Failed to parse Connect end stream", { kind: "envelope" });
+	}
+	if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+		return new AIError.ProviderResponseError("Connect end stream had an invalid shape", { kind: "envelope" });
+	}
+	const error = (payload as { error?: unknown }).error;
+	if (error === undefined) return null;
+	if (!error || typeof error !== "object" || Array.isArray(error)) {
+		return new AIError.ProviderResponseError("Connect end error had an invalid shape", { kind: "envelope" });
+	}
+	const record = error as { code?: unknown; message?: unknown };
+	const code = typeof record.code === "string" ? record.code : "unknown";
+	const message = typeof record.message === "string" ? record.message : "Unknown error";
+	return new AIError.ProviderResponseError(`Connect error ${code}: ${message}`, { kind: "envelope" });
+}
+
+function safeDecodeGrpcMessage(value: unknown): string {
+	const raw = String(value ?? "");
+	try {
+		return sanitizeText(decodeURIComponent(raw)).slice(0, 512);
+	} catch {
+		return sanitizeText(raw).slice(0, 512);
 	}
 }
 
@@ -808,7 +828,15 @@ function omitTypeName(record: Record<string, unknown>): Record<string, unknown> 
 /** Non-secret state namespace: credential fingerprint + normalized endpoint + conversation id. */
 export function createCursorConversationStateKey(apiKey: string, baseUrl: string, conversationId: string): string {
 	const authFingerprint = createHash("sha256").update(apiKey).digest("hex");
-	return `${authFingerprint}:${baseUrl.replace(/\/+$/, "")}:${conversationId}`;
+	const origin = normalizeCursorOrigin(baseUrl);
+	const hash = createHash("sha256");
+	for (const value of [authFingerprint, origin, conversationId]) {
+		const bytes = Buffer.from(value, "utf8");
+		const length = Buffer.allocUnsafe(4);
+		length.writeUInt32BE(bytes.length);
+		hash.update(length).update(bytes);
+	}
+	return hash.digest("hex");
 }
 
 export type CursorOptions = CursorAgentOptions;
@@ -823,6 +851,10 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 	(async () => {
 		const startTime = performance.now();
 		let firstTokenTime: number | undefined;
+		const turnAbortController = new AbortController();
+		const turnSignal = options?.signal
+			? AbortSignal.any([options.signal, turnAbortController.signal])
+			: turnAbortController.signal;
 
 		const output: AssistantMessage = {
 			role: "assistant",
@@ -841,7 +873,7 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 			stopReason: "stop",
 			timestamp: Date.now(),
 		};
-		const wireModelId = resolveCursorWireModelId(model, options);
+		let wireModelId = model.id;
 
 		// Declared outside the `try` because BOTH exits must drain it: an exec
 		// handler decoded from the last chunk can still be running when the
@@ -860,20 +892,27 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 		// Once aborted, the Agent finalizes from the abort error and discards
 		// late results regardless, so skipping the rest of the drain loses
 		// nothing that could still be delivered.
-		let abortSettled: Promise<void> | undefined;
 		const drainInFlightDispatches = async (): Promise<void> => {
-			const signal = options?.signal;
 			while (inFlightDispatches.size > 0) {
-				if (signal?.aborted) return;
-				const settled = Promise.all([...inFlightDispatches]);
-				if (!signal) {
-					await settled;
+				// Only a caller cancellation may skip the drain. Internal turn
+				// cancellation tells cooperative handlers to stop, but handlers that
+				// already performed side effects still need their result paired before
+				// the terminal error is emitted.
+				if (options?.signal?.aborted) return;
+				if (!options?.signal) {
+					await Promise.all([...inFlightDispatches]);
 					continue;
 				}
-				abortSettled ??= new Promise<void>((resolve) =>
-					signal.addEventListener("abort", () => resolve(), { once: true }),
-				);
-				await Promise.race([settled, abortSettled]);
+				let onAbort: (() => void) | undefined;
+				const aborted = new Promise<void>((resolve) => {
+					onAbort = resolve;
+					options.signal!.addEventListener("abort", onAbort, { once: true });
+				});
+				try {
+					await Promise.race([Promise.all([...inFlightDispatches]), aborted]);
+				} finally {
+					if (onAbort) options.signal.removeEventListener("abort", onAbort);
+				}
 			}
 		};
 
@@ -896,10 +935,18 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 			resolve: resolveH2,
 			reject: rejectH2,
 		};
+		// A synchronous failure while constructing/writing the first frame can
+		// leave transport callbacks rejecting before control reaches the await.
+		// Keep that rejection observed; the normal await still preserves it.
+		void h2Completion.promise.catch(() => {});
 		let h2Settled = false;
+		let headersAccepted = false;
 		let sawTurnEnded = false;
 		let sawEndEnvelope = false;
+		const execDispatchRegistry = new Map<number, Promise<void>>();
+		const toolResultSinkRegistry = new Map<string, Promise<ToolResultMessage>>();
 		let dispatchError: unknown;
+		let forcedTerminalError: unknown;
 		let endStreamError: Error | null = null;
 		// Reachable from the catch: a stream that dies mid-turn must still close
 		// and pair the blocks it left open, and `state` itself is scoped to the
@@ -907,27 +954,43 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 		let openBlockState: BlockState | undefined;
 		const settleH2 = (error?: unknown): void => {
 			if (h2Settled) return;
-			h2Settled = true;
+			const rejectTerminal = (failure: unknown) => {
+				h2Settled = true;
+				turnAbortController.abort(failure);
+				h2Completion.reject(failure);
+			};
 			if (error !== undefined) {
-				h2Completion.reject(error);
+				rejectTerminal(error);
 				return;
 			}
 			if (endStreamError) {
-				h2Completion.reject(endStreamError);
+				rejectTerminal(endStreamError);
 				return;
 			}
 			if (!sawTurnEnded) {
-				h2Completion.reject(
+				rejectTerminal(
 					new AIError.ProviderResponseError("Cursor stream ended before turnEnded", {
+						provider: "cursor-not-cloud",
 						kind: "incomplete-stream",
 					}),
 				);
 				return;
 			}
+			if (!sawEndEnvelope) {
+				rejectTerminal(
+					new AIError.ProviderResponseError("Cursor stream ended before the Connect end envelope", {
+						provider: "cursor-not-cloud",
+						kind: "incomplete-stream",
+					}),
+				);
+				return;
+			}
+			h2Settled = true;
 			h2Completion.resolve();
 		};
 
 		try {
+			wireModelId = resolveCursorAgentModelId(model, options);
 			const apiKey = options?.apiKey ?? getEnvApiKey(model.provider);
 			if (!apiKey) {
 				throw new AIError.MissingApiKeyError(undefined, "Cursor API key (access token) is required");
@@ -939,14 +1002,14 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 				baseUrl: model.baseUrl,
 				clientVersion: options?.clientVersion,
 				timeoutMs: options?.timeoutMs,
-				signal: options?.signal,
+				signal: turnSignal,
 				modelIds: options?.discoveredModelIds,
 			});
 
 			const conversationId = options?.conversationId ?? options?.sessionId ?? crypto.randomUUID();
-			const baseUrl = (model.baseUrl || CURSOR_API_URL).replace(/\/+$/, "");
+			const baseUrl = normalizeCursorOrigin(model.baseUrl || CURSOR_API_URL);
 			const stateKey = createCursorConversationStateKey(apiKey, baseUrl, conversationId);
-			conversationLease = cursorConversationStateStore.acquire(stateKey);
+			conversationLease = cursorConversationStateStore.acquire(stateKey, Date.now(), conversationId);
 			const blobStore = conversationLease.blobStore;
 			const { requestBytes, conversationState } = await buildGrpcRequest(model, context, options, {
 				conversationId,
@@ -982,7 +1045,7 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 			const proxyUrl = shouldBypassProxy(new URL(baseUrl)) ? undefined : getProxyForProvider(model.provider);
 			if (proxyUrl) {
 				const tlsSocket = await connectProxiedSocket(proxyUrl, baseUrl, {
-					signal: options?.signal,
+					signal: turnSignal,
 					timeoutMs: CURSOR_PROXY_TUNNEL_TIMEOUT_MS,
 				});
 				h2Client = http2.connect(baseUrl, {
@@ -999,6 +1062,8 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 					provider: "cursor-not-cloud",
 					kind: "timeout",
 				});
+				forcedTerminalError ??= error;
+				turnAbortController.abort(error);
 				settleH2(error);
 				h2Request?.close();
 			};
@@ -1023,6 +1088,40 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 			let currentToolCall: ToolCallState | null = null;
 			const resolvedMcpToolCallIds = new Set<string>();
 			const usageState: UsageState = { sawTokenDelta: false };
+			const trackedOnToolResult: CursorToolResultHandler | undefined = options?.onToolResult
+				? (toolResult) => {
+						const key = `${toolResult.toolCallId}\0${toolResult.toolName}`;
+						const existing = toolResultSinkRegistry.get(key);
+						if (existing) return existing;
+						if (toolResultSinkRegistry.size >= 4_096) {
+							const error = new AIError.ProviderResponseError(
+								"Cursor tool-result sink registry exceeded its per-turn bound",
+								{ provider: "cursor-not-cloud", kind: "oversized" },
+							);
+							dispatchError ??= error;
+							settleH2(error);
+							return Promise.resolve(toolResult);
+						}
+						const work = raceCursorExecWithAbort(
+							Promise.resolve()
+								.then(() => options.onToolResult?.(toolResult))
+								.then((updated) => updated ?? toolResult),
+							turnSignal,
+						);
+						toolResultSinkRegistry.set(key, work);
+						const monitored = work.then(
+							() => undefined,
+							(error) => {
+								dispatchError ??= error;
+								settleH2(error);
+								h2Request?.close();
+							},
+						);
+						inFlightDispatches.add(monitored);
+						void monitored.then(() => inFlightDispatches.delete(monitored));
+						return work;
+					}
+				: undefined;
 
 			const state: BlockState = {
 				get currentTextBlock() {
@@ -1052,7 +1151,7 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 					if (!firstTokenTime) firstTokenTime = performance.now();
 				},
 				onTodoSnapshot: options?.execHandlers?.todoSync?.bind(options.execHandlers),
-				onToolResult: options?.onToolResult,
+				onToolResult: trackedOnToolResult,
 			};
 			openBlockState = state;
 
@@ -1070,21 +1169,30 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 					.split(";", 1)[0]
 					?.trim()
 					.toLowerCase();
-				if (contentType !== "application/connect+proto") {
-					endStreamError = new AIError.ProviderResponseError(
-						`Cursor run returned unsupported content type ${contentType || "<missing>"}`,
-						{ provider: "cursor-not-cloud", kind: "content-type" },
-					);
-				}
 				if (status < 200 || status >= 300) {
-					endStreamError = new AIError.ProviderResponseError(`Cursor run failed with HTTP ${status}`, {
+					const error = new AIError.ProviderResponseError(`Cursor run failed with HTTP ${status}`, {
 						provider: "cursor-not-cloud",
-						kind: "http",
+						kind: status === 401 || status === 403 ? "auth" : "http",
+						status,
 					});
+					settleH2(error);
+					h2Request?.close();
+					return;
 				}
+				if (contentType !== "application/connect+proto") {
+					const error = new AIError.ProviderResponseError(
+						`Cursor run returned unsupported content type ${contentType || "<missing>"}`,
+						{ provider: "cursor-not-cloud", kind: "content-type", status },
+					);
+					settleH2(error);
+					h2Request?.close();
+					return;
+				}
+				headersAccepted = true;
 			});
 
 			h2Request.on("data", (chunk: Buffer) => {
+				if (!headersAccepted || h2Settled) return;
 				if (debugResponseLogPromise) {
 					void debugResponseLogPromise.then((log) => {
 						log?.write(chunk);
@@ -1136,11 +1244,33 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 					pendingBuffer = pendingBuffer.subarray(5 + msgLen);
 
 					if (flags === CONNECT_END_STREAM_FLAG) {
+						if (sawEndEnvelope) {
+							settleH2(
+								new AIError.ProviderResponseError("Cursor sent duplicate Connect end envelopes", {
+									provider: "cursor-not-cloud",
+									kind: "envelope",
+								}),
+							);
+							h2Request?.close();
+							return;
+						}
 						sawEndEnvelope = true;
 						const endError = parseConnectEndStream(messageBytes);
 						if (endError) {
 							endStreamError = endError;
+							settleH2(endError);
 							h2Request?.close();
+							return;
+						}
+						if (!sawTurnEnded) {
+							settleH2(
+								new AIError.ProviderResponseError("Cursor Connect end envelope arrived before turnEnded", {
+									provider: "cursor-not-cloud",
+									kind: "envelope",
+								}),
+							);
+							h2Request?.close();
+							return;
 						}
 						continue;
 					}
@@ -1173,12 +1303,13 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 							blobStore,
 							h2Request!,
 							options?.execHandlers,
-							options?.onToolResult,
+							trackedOnToolResult,
 							usageState,
 							requestContextTools,
 							onConversationCheckpoint,
 							execAbortControllers,
-							options?.signal,
+							turnSignal,
+							execDispatchRegistry,
 						).catch((error) => {
 							dispatchError ??= error;
 							log("error", "handleServerMessage", { error: String(error) });
@@ -1215,7 +1346,12 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 					message: { case: "clientHeartbeat", value: create(ClientHeartbeatSchema, {}) },
 				});
 				const heartbeatBytes = toBinary(AgentClientMessageSchema, heartbeatMessage);
-				writeConnectMessage(h2Request, heartbeatBytes);
+				try {
+					writeConnectMessage(h2Request, heartbeatBytes);
+				} catch (error) {
+					settleH2(error);
+					h2Request?.close();
+				}
 			};
 
 			const closeDebugLog = async (): Promise<void> => {
@@ -1224,13 +1360,19 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 			};
 
 			h2Request.on("trailers", (trailers) => {
-				const status = trailers["grpc-status"];
-				const msg = trailers["grpc-message"];
-				if (status && status !== "0" && !endStreamError) {
-					endStreamError = new AIError.ProviderResponseError(
-						`gRPC error ${status}: ${decodeURIComponent(String(msg || ""))}`,
-						{ kind: "envelope" },
-					);
+				try {
+					const status = trailers["grpc-status"];
+					if (status && status !== "0" && !endStreamError) {
+						endStreamError = new AIError.ProviderResponseError(
+							`gRPC error ${status}: ${safeDecodeGrpcMessage(trailers["grpc-message"])}`,
+							{ provider: "cursor-not-cloud", kind: "envelope" },
+						);
+						settleH2(endStreamError);
+						h2Request?.close();
+					}
+				} catch (error) {
+					settleH2(error);
+					h2Request?.close();
 				}
 			});
 
@@ -1255,6 +1397,24 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 				const mapped = mapH2TransportError(error, baseUrl);
 				void closeDebugLog().finally(() => settleH2(mapped));
 			});
+			h2Request.on("aborted", () => {
+				settleH2(
+					new AIError.ProviderResponseError("Cursor HTTP/2 stream was aborted", {
+						provider: "cursor-not-cloud",
+						kind: "transport",
+					}),
+				);
+			});
+			h2Request.on("close", () => {
+				if (!h2Settled && !h2Request?.readableEnded) {
+					settleH2(
+						new AIError.ProviderResponseError("Cursor HTTP/2 stream closed abnormally", {
+							provider: "cursor-not-cloud",
+							kind: "transport",
+						}),
+					);
+				}
+			});
 
 			if (options?.signal) {
 				abortRequest = () => {
@@ -1278,11 +1438,15 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 			// unpaired and stripped from every rebuilt transcript. Each dispatch
 			// already swallows its own rejection, so this only waits.
 			await drainInFlightDispatches();
+			if (forcedTerminalError) throw forcedTerminalError;
 			if (dispatchError) throw dispatchError;
 
 			endCurrentTextBlock(output, stream, state);
 			endCurrentThinkingBlock(output, stream, state);
 			flushOpenToolCalls(output, stream, state);
+			await drainInFlightDispatches();
+			if (forcedTerminalError) throw forcedTerminalError;
+			if (dispatchError) throw dispatchError;
 
 			calculateCursorAgentUsageCost(model, wireModelId, output.usage);
 
@@ -1321,6 +1485,7 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			recordStreamFailure(model, output, error);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });
@@ -1336,8 +1501,11 @@ export const streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions
 			if (idleTimer) clearTimeout(idleTimer);
 			if (connectTimer) clearTimeout(connectTimer);
 			if (abortRequest) options?.signal?.removeEventListener("abort", abortRequest);
+			turnAbortController.abort();
 			for (const controller of execAbortControllers.values()) controller.abort();
 			execAbortControllers.clear();
+			execDispatchRegistry.clear();
+			toolResultSinkRegistry.clear();
 			conversationLease?.release();
 			conversationLease = undefined;
 			h2Request?.close();
@@ -1413,6 +1581,7 @@ export async function handleServerMessage(
 	onConversationCheckpoint?: (checkpoint: ConversationStateStructure) => void,
 	execAbortControllers = new Map<number, AbortController>(),
 	providerSignal?: AbortSignal,
+	execDispatchRegistry = new Map<number, Promise<void>>(),
 ): Promise<void> {
 	const msgCase = msg.message.case;
 
@@ -1423,51 +1592,61 @@ export async function handleServerMessage(
 	} else if (msgCase === "kvServerMessage") {
 		handleKvServerMessage(msg.message.value as KvServerMessage, blobStore, h2Request);
 	} else if (msgCase === "execServerMessage") {
-		// The server is waiting on OUR local tool result during this window — no
-		// AssistantMessageEvent flows until the handler finishes. Mark the wait
-		// as local work so the lazy stream idle watchdog attributes the silence
-		// to the tool run instead of aborting a healthy stream (issue #4593).
 		const execMessage = msg.message.value as ExecServerMessage;
-		const abortController = new AbortController();
-		const previous = execAbortControllers.get(execMessage.id);
-		previous?.abort();
-		execAbortControllers.set(execMessage.id, abortController);
-		const signal = providerSignal
-			? AbortSignal.any([providerSignal, abortController.signal])
-			: abortController.signal;
-		const execContext: CursorExecHandlerContext = { signal };
-		try {
-			const execWork = handleExecServerMessage(
-				execMessage,
-				h2Request,
-				execHandlers,
-				// Result hooks race the per-exec abort just like the handlers
-				// themselves: a hung `onToolResult` must reject on abort instead of
-				// keeping this dispatch (and the terminal drain awaiting it) open.
-				bindCursorToolResultHandler(onToolResult, execContext),
-				requestContextTools,
-				output,
-				stream,
-				state,
-				execContext,
-			);
-			await (stream.trackLocalWork?.(execWork) ?? execWork);
-		} catch (error) {
-			// Never strand an exec id because a dispatcher bug or result hook threw
-			// outside the normal typed-error builders.
-			sendExecClientThrow(
-				h2Request,
-				execMessage,
-				error instanceof Error ? error.message : String(error),
-				"client_dispatch_error",
-			);
-			log("error", "execDispatch", { error: String(error), execId: execMessage.execId });
-			if (!execContext.signal?.aborted) throw error;
-		} finally {
-			if (execAbortControllers.get(execMessage.id) === abortController) {
-				execAbortControllers.delete(execMessage.id);
-			}
+		const existing = execDispatchRegistry.get(execMessage.id);
+		if (existing) {
+			await existing;
+			return;
 		}
+		if (execDispatchRegistry.size >= 4_096) {
+			throw new AIError.ProviderResponseError("Cursor exec correlation registry exceeded its per-turn bound", {
+				provider: "cursor-not-cloud",
+				kind: "oversized",
+			});
+		}
+		const execution = (async () => {
+			// The server is waiting on OUR local tool result during this window — no
+			// AssistantMessageEvent flows until the handler finishes. Mark the wait
+			// as local work so the lazy stream idle watchdog attributes the silence
+			// to the tool run instead of aborting a healthy stream (issue #4593).
+			const abortController = new AbortController();
+			execAbortControllers.set(execMessage.id, abortController);
+			const signal = providerSignal
+				? AbortSignal.any([providerSignal, abortController.signal])
+				: abortController.signal;
+			const execContext: CursorExecHandlerContext = { signal };
+			try {
+				const execWork = handleExecServerMessage(
+					execMessage,
+					h2Request,
+					execHandlers,
+					bindCursorToolResultHandler(onToolResult, execContext),
+					requestContextTools,
+					output,
+					stream,
+					state,
+					execContext,
+				);
+				await (stream.trackLocalWork?.(execWork) ?? execWork);
+			} catch (error) {
+				if (!h2Request.closed && !h2Request.destroyed) {
+					sendExecClientThrow(
+						h2Request,
+						execMessage,
+						error instanceof Error ? error.message : String(error),
+						"client_dispatch_error",
+					);
+				}
+				log("error", "execDispatch", { error: String(error), execId: execMessage.execId });
+				if (!execContext.signal?.aborted) throw error;
+			} finally {
+				if (execAbortControllers.get(execMessage.id) === abortController) {
+					execAbortControllers.delete(execMessage.id);
+				}
+			}
+		})();
+		execDispatchRegistry.set(execMessage.id, execution);
+		await execution;
 	} else if (msgCase === "execServerControlMessage") {
 		const control = msg.message.value.message;
 		if (control.case === "abort") {
@@ -1483,9 +1662,6 @@ export async function handleServerMessage(
 		handleConversationCheckpointUpdate(msg.message.value, output, onConversationCheckpoint);
 	} else if (msgCase === "interactionQuery") {
 		handleInteractionQuery(msg.message.value, h2Request);
-	} else if (msgCase === "ttftBreakdown") {
-		// Optional telemetry; decoding it proves schema compatibility but it needs no reply.
-		log("serverMessage", "ttftBreakdown");
 	} else {
 		throw new AIError.ProviderResponseError("Cursor sent an unknown required server message variant", {
 			provider: "cursor-not-cloud",
@@ -1638,67 +1814,6 @@ export function handleInteractionQuery(query: InteractionQuery, h2Request: http2
 					kind: "capability",
 				},
 			);
-		// Cursor CLI v2026.08.04 fields 9-14, typed in the regenerated descriptor.
-		case "webFetchRequestQuery":
-			result = {
-				case: "webFetchRequestResponse",
-				value: create(WebFetchRequestResponseSchema, {
-					result: {
-						case: "rejected",
-						value: create(WebFetchRequestResponse_RejectedSchema, { reason }),
-					},
-				}),
-			};
-			break;
-		case "prManagementRequestQuery":
-			result = {
-				case: "prManagementResult",
-				value: create(PrManagementResultSchema, {
-					result: { case: "rejected", value: create(PrManagementRejectedSchema, { reason }) },
-				}),
-			};
-			break;
-		case "mcpAuthRequestQuery":
-			result = {
-				case: "mcpAuthRequestResponse",
-				value: create(McpAuthRequestResponseSchema, {
-					result: {
-						case: "rejected",
-						value: create(McpAuthRequestResponse_RejectedSchema, { reason }),
-					},
-				}),
-			};
-			break;
-		case "generateImageRequestQuery":
-			result = {
-				case: "generateImageRequestResponse",
-				value: create(GenerateImageRequestResponseSchema, {
-					result: {
-						case: "rejected",
-						value: create(GenerateImageRequestResponse_RejectedSchema, { reason }),
-					},
-				}),
-			};
-			break;
-		case "replaceEnvArgs":
-			result = {
-				case: "replaceEnvResult",
-				value: create(ReplaceEnvResultSchema, {
-					result: { case: "failure", value: create(ReplaceEnvFailureSchema, { errorMessage: reason }) },
-				}),
-			};
-			break;
-		case "connectScmRequestQuery":
-			result = {
-				case: "connectScmRequestResponse",
-				value: create(ConnectScmRequestResponseSchema, {
-					result: {
-						case: "rejected",
-						value: create(ConnectScmRequestResponse_RejectedSchema, { reason }),
-					},
-				}),
-			};
-			break;
 		default:
 			throw new AIError.ProviderResponseError("Cursor sent an unknown interaction query variant", {
 				provider: "cursor-not-cloud",
@@ -4766,8 +4881,11 @@ export function processInteractionUpdate(
 		output.usage.output = safeCount(terminal.outputTokens);
 		output.usage.cacheRead = safeCount(terminal.cacheReadTokens);
 		output.usage.cacheWrite = safeCount(terminal.cacheWriteTokens);
+		// Cursor reports reasoning as an informational subset of output, so do not
+		// add it again. Cache writes are an independent usage component.
 		output.usage.reasoning = safeCount(terminal.reasoningTokens);
-		output.usage.totalTokens = output.usage.input + output.usage.output + output.usage.cacheRead;
+		output.usage.totalTokens =
+			output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 		usageState.sawTerminalUsage = true;
 	} else if (updateCase === "tokenDelta") {
 		const tokenDelta = update.message.value;
@@ -5543,7 +5661,7 @@ const CURSOR_GROK_FAST_COST = { input: 4, output: 18 } as const;
 
 /** Concrete wire model a request runs against: the routed sibling id when reasoning/fast routing resolved one. */
 function resolveCursorWireModelId(model: Model<"cursor-not-cloud">, options: CursorOptions | undefined): string {
-	return options?.requestModelId ?? model.requestModelId ?? model.id;
+	return resolveCursorAgentModelId(model, options);
 }
 
 /** Exported for tests: bill fast routes at fast rates, everything else at the model's standard metadata. */
@@ -5566,7 +5684,7 @@ export function resolveCursorAgentModelId(
 	const requested = options?.reasoning ?? "high";
 	const resolved = clampThinkingLevel(model, requested);
 	const mapped = model.thinkingLevelMap?.[resolved];
-	if (typeof mapped !== "string") {
+	if (typeof mapped !== "string" || !CURSOR_GROK_45_NORMAL_ROUTE_IDS.some((route) => route === mapped)) {
 		throw new AIError.ProviderResponseError(
 			`Cursor Grok 4.5 does not expose a wire route for resolved reasoning level ${resolved}`,
 			{ provider: "cursor-not-cloud", kind: "capability" },
@@ -5591,7 +5709,8 @@ export const streamSimpleCursorAgent: StreamFunction<"cursor-not-cloud", SimpleS
 ): AssistantMessageEventStream => {
 	return streamCursor(model, context, {
 		...buildBaseOptions(model, options),
-		requestModelId: resolveCursorAgentModelId(model, options),
+		reasoning: options?.reasoning,
+		serviceTier: options?.serviceTier,
 		execHandlers: options?.cursorExecHandlers,
 		onToolResult: options?.cursorOnToolResult ?? options?.cursorExecHandlers?.onToolResult,
 	});

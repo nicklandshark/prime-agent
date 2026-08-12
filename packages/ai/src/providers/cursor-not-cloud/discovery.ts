@@ -3,7 +3,7 @@ import * as http2 from "node:http2";
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import { GetUsableModelsRequestSchema, GetUsableModelsResponseSchema } from "./agent_pb.js";
 import { connectProxiedSocket, getProxyForProvider, shouldBypassProxy } from "./compat.js";
-import { CURSOR_API_URL, resolveCursorClientVersion } from "./config.js";
+import { CURSOR_API_URL, normalizeCursorOrigin, resolveCursorClientVersion } from "./config.js";
 
 const GET_USABLE_MODELS_PATH = "/agent.v1.AgentService/GetUsableModels";
 const MAX_CATALOG_BYTES = 8 * 1024 * 1024;
@@ -44,7 +44,10 @@ export class CursorDiscoveryError extends Error {
 	) {
 		super(message);
 		this.name = "CursorDiscoveryError";
-		this.transient = kind === "timeout" || kind === "network" || (kind === "http" && (status ?? 0) >= 500);
+		this.transient =
+			kind === "timeout" ||
+			kind === "network" ||
+			(kind === "http" && ([408, 425, 429].includes(status ?? 0) || (status ?? 0) >= 500));
 	}
 }
 
@@ -58,7 +61,7 @@ type DiscoveryOptions = {
 type RawCatalogResponse = { payload: Uint8Array; contentType: string };
 
 function normalizeBaseUrl(baseUrl?: string): string {
-	return (baseUrl ?? CURSOR_API_URL).replace(/\/+$/, "");
+	return normalizeCursorOrigin(baseUrl ?? CURSOR_API_URL);
 }
 
 function decodeConnectUnaryBody(payload: Uint8Array): Uint8Array {
@@ -66,12 +69,14 @@ function decodeConnectUnaryBody(payload: Uint8Array): Uint8Array {
 	let dataFrame: Uint8Array | undefined;
 	let sawEnd = false;
 	while (offset < payload.length) {
+		if (sawEnd)
+			throw new CursorDiscoveryError("Cursor catalog sent a frame after its Connect end envelope", "decode");
 		if (payload.length - offset < 5)
 			throw new CursorDiscoveryError("Cursor catalog ended with a partial Connect header", "truncated");
 		const flags = payload[offset] ?? 0;
 		if ((flags & 1) !== 0)
 			throw new CursorDiscoveryError("Compressed Cursor catalog frames are unsupported", "compressed");
-		if ((flags & ~2) !== 0)
+		if (flags !== 0 && flags !== 2)
 			throw new CursorDiscoveryError("Cursor catalog used unknown Connect frame flags", "decode");
 		const length = new DataView(payload.buffer, payload.byteOffset + offset + 1, 4).getUint32(0, false);
 		if (length > MAX_CONNECT_FRAME_BYTES)
@@ -80,30 +85,36 @@ function decodeConnectUnaryBody(payload: Uint8Array): Uint8Array {
 		if (end > payload.length)
 			throw new CursorDiscoveryError("Cursor catalog ended with a partial Connect frame", "truncated");
 		const body = payload.subarray(offset + 5, end);
-		if ((flags & 2) !== 0) {
+		if (flags === 2) {
+			if (!dataFrame)
+				throw new CursorDiscoveryError("Cursor catalog end envelope arrived before unary data", "decode");
 			sawEnd = true;
+			let envelope: unknown;
 			try {
-				const envelope = JSON.parse(new TextDecoder().decode(body)) as {
-					error?: { code?: unknown; message?: unknown };
-				};
-				if (envelope.error) {
-					throw new CursorDiscoveryError(
-						`Cursor model discovery returned Connect error ${String(envelope.error.code ?? "unknown")}`,
-						"http",
-					);
-				}
-			} catch (error) {
-				if (error instanceof CursorDiscoveryError) throw error;
+				envelope = JSON.parse(new TextDecoder().decode(body));
+			} catch {
 				throw new CursorDiscoveryError("Cursor catalog end envelope was malformed", "decode");
 			}
+			if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)) {
+				throw new CursorDiscoveryError("Cursor catalog end envelope had an invalid shape", "decode");
+			}
+			const error = (envelope as { error?: unknown }).error;
+			if (error !== undefined) {
+				if (!error || typeof error !== "object" || Array.isArray(error))
+					throw new CursorDiscoveryError("Cursor catalog end error had an invalid shape", "decode");
+				throw new CursorDiscoveryError(
+					`Cursor model discovery returned Connect error ${String((error as { code?: unknown }).code ?? "unknown")}`,
+					"http",
+				);
+			}
 		} else {
-			if (sawEnd || dataFrame)
-				throw new CursorDiscoveryError("Cursor catalog returned multiple unary data frames", "decode");
+			if (dataFrame) throw new CursorDiscoveryError("Cursor catalog returned multiple unary data frames", "decode");
 			dataFrame = body;
 		}
 		offset = end;
 	}
 	if (!dataFrame) throw new CursorDiscoveryError("Cursor catalog Connect response had no data frame", "decode");
+	if (!sawEnd) throw new CursorDiscoveryError("Cursor catalog Connect response had no end envelope", "truncated");
 	return dataFrame;
 }
 
@@ -232,8 +243,14 @@ type CachedCatalog = { modelIds: Set<string>; refreshedAt: number };
 const catalogCache = new Map<string, CachedCatalog>();
 
 function cacheKey(apiKey: string, options: DiscoveryOptions): string {
-	const fingerprint = createHash("sha256").update(apiKey).digest("hex");
-	return `${fingerprint}:${normalizeBaseUrl(options.baseUrl)}:${resolveCursorClientVersion(options.clientVersion)}`;
+	const values = [
+		createHash("sha256").update(apiKey).digest("hex"),
+		normalizeBaseUrl(options.baseUrl),
+		resolveCursorClientVersion(options.clientVersion),
+	];
+	const hash = createHash("sha256");
+	for (const value of values) hash.update(`${Buffer.byteLength(value)}:`).update(value);
+	return hash.digest("hex");
 }
 
 export async function getCursorAgentModelCatalog(

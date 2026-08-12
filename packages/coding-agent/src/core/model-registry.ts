@@ -1008,40 +1008,40 @@ export class ModelRegistry {
 
 		const cursorModels = executableModels.filter((model) => model.provider === "cursor-not-cloud");
 		if (cursorModels.length > 0) {
-			const auth = await this.getApiKeyAndHeaders(cursorModels[0]!);
+			let auth = await this.getApiKeyAndHeaders(cursorModels[0]!);
 			if (!auth.ok || !auth.apiKey) {
 				executableModels = executableModels.filter((model) => model.provider !== "cursor-not-cloud");
 			} else {
-				let modelIds: Set<string> | undefined;
 				try {
 					// Dedicated dynamic discovery import preserves coding-agent cold-start laziness.
-					const { getCursorAgentModelCatalog, hasCursorAgentLogicalModelRoutes } = await import(
-						"@earendil-works/pi-ai/cursor-not-cloud/discovery"
+					const discovery = await import("@earendil-works/pi-ai/cursor-not-cloud/discovery");
+					const fetchCatalog = async (apiKey: string) =>
+						await discovery.getCursorAgentModelCatalog(apiKey, { baseUrl: cursorModels[0]!.baseUrl });
+					let catalog: Awaited<ReturnType<typeof fetchCatalog>>;
+					try {
+						catalog = await fetchCatalog(auth.apiKey);
+					} catch (error) {
+						const failedSource = this.getCurrentProviderAuthSourceToken("cursor-not-cloud");
+						const authFailure =
+							error instanceof discovery.CursorDiscoveryError && (error.status === 401 || error.status === 403);
+						if (!authFailure || !failedSource) throw error;
+						const rotated = await this.recoverCursorNotCloudOfficialCredential(failedSource);
+						if (!rotated) {
+							this.markProviderAuthSourceStale(failedSource);
+							throw error;
+						}
+						auth = await this.getApiKeyAndHeaders(cursorModels[0]!);
+						if (!auth.ok || !auth.apiKey) throw error;
+						catalog = await fetchCatalog(auth.apiKey);
+					}
+					const modelIds = catalog.modelIds;
+					executableModels = executableModels.filter(
+						(model) =>
+							model.provider !== "cursor-not-cloud" ||
+							discovery.hasCursorAgentLogicalModelRoutes(model.id, modelIds),
 					);
-					modelIds = (
-						await getCursorAgentModelCatalog(auth.apiKey, {
-							baseUrl: cursorModels[0]!.baseUrl,
-						})
-					).modelIds;
-					executableModels = executableModels
-						.filter(
-							(model) =>
-								model.provider !== "cursor-not-cloud" || hasCursorAgentLogicalModelRoutes(model.id, modelIds!),
-						)
-						.map((model) => {
-							if (model.provider !== "cursor-not-cloud" || !model.thinkingLevelMap) return model;
-							return {
-								...model,
-								thinkingLevelMap: Object.fromEntries(
-									Object.entries(model.thinkingLevelMap).map(([level, route]) => [
-										level,
-										typeof route === "string" && modelIds!.has(route) ? route : null,
-									]),
-								),
-							};
-						});
 				} catch {
-					// A cold typed discovery failure means capability is unknown, not an empty entitlement.
+					// Cold typed discovery failure is diagnosable via auth status and hides an unknown entitlement.
 					executableModels = executableModels.filter((model) => model.provider !== "cursor-not-cloud");
 				}
 			}
