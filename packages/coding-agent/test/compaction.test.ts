@@ -212,6 +212,12 @@ describe("Token calculation", () => {
 		const usage = createMockUsage(0, 0, 0, 0);
 		expect(calculateContextTokens(usage)).toBe(0);
 	});
+
+	it("prefers provider-reported occupied context without billing it as input", () => {
+		const usage = { ...createMockUsage(11161, 23, 0, 0), contextTokens: 11184 };
+		expect(calculateContextTokens(usage)).toBe(11184);
+		expect(usage.input).toBe(11161);
+	});
 });
 
 describe("getLastAssistantUsage", () => {

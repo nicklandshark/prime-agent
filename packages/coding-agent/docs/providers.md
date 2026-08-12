@@ -18,6 +18,7 @@ Use `/login` in interactive mode, then select a provider:
 - ChatGPT Plus/Pro (Codex)
 - Claude Pro/Max
 - GitHub Copilot
+- Cursor Subscription (`cursor-not-cloud`)
 
 Use `/logout` to clear credentials. Tokens are stored in `~/.prime/agent/auth.json` and auto-refresh when expired.
 
@@ -34,6 +35,43 @@ Anthropic subscription auth is active for Claude Pro/Max accounts. Third-party h
 
 - Press Enter for github.com, or enter your GitHub Enterprise Server domain
 - If you get "model not supported", enable it in VS Code: Copilot Chat → model selector → select model → "Enable"
+
+### Cursor Subscription (`cursor-not-cloud`)
+
+`cursor-not-cloud/cursor-grok-4.5-high` uses your Cursor subscription directly through Cursor's native
+AgentService endpoint at `https://api2.cursor.sh`. It is separate from the `cursor` Cloud Agents provider and
+never launches or shells out to the Cursor executable.
+
+Authenticate with `/login`. Prime can read the official Cursor auth file **read-only** (override its path with
+`CURSOR_AGENT_AUTH_FILE`) or complete Cursor's browser PKCE flow. Prime imports only the access token; it never
+copies the official refresh token or rewrites the official file. Browser login does not retain an unusable refresh
+secret. For non-interactive use, set `CURSOR_AGENT_TOKEN` or `CURSOR_ACCESS_TOKEN`; `CURSOR_TOKEN` and cloud-only
+`CURSOR_API_KEY` are intentionally not accepted.
+
+The tray fetches the active account email through Cursor's authenticated `GetMe` RPC and binds it to the exact
+credential fingerprint. Safe fallbacks are a matching official cached email, a shortened stable auth ID, then
+`Cursor subscription`. The full email appears only in the local tray and is not logged.
+
+Cursor reasoning is sibling-model routing:
+
+| Prime request | Resolved tray/handle level | Normal route | Fast route |
+|---|---|---|---|
+| `off`, `minimal`, `low` | `low` | `cursor-grok-4.5-low` | `cursor-grok-4.5-low-fast` |
+| `medium` | `medium` | `cursor-grok-4.5-medium` | `cursor-grok-4.5-medium-fast` |
+| `high`, `xhigh`, `max` | `high` | `cursor-grok-4.5-high` | `cursor-grok-4.5-high-fast` |
+
+`/fast` selects the matching `-fast` sibling; it does not send a service-tier field. RLM children use the normal
+omitted/inherit, `fast=true`, and `fast=false` rules. Explicit `null` is invalid. Live discovery validates the final
+normal or fast route for the active credential and returns a capability error instead of silently substituting.
+
+Conversation checkpoints and blobs are bounded, credential/base-URL isolated, and process-local. A restart starts
+a new remote conversation, but Prime reconstructs the request from the persisted local transcript, including paired
+tool calls/results. Current checkpoints report a 256,000-token context ceiling. The catalog's 64,000 `maxTokens` is
+a conservative local fallback and is not sent as a Cursor server output limit.
+
+Token costs shown by Prime are estimates, not Cursor subscription invoices: normal `$2/M` input and `$6/M` output;
+fast `$4/M` input and `$18/M` output. Cache usage is reported but unpriced because no reviewed primary source
+established a cache rate.
 
 ## API Keys
 
@@ -68,6 +106,7 @@ prime-agent
 | Hugging Face | `HF_TOKEN` | `huggingface` |
 | Fireworks | `FIREWORKS_API_KEY` | `fireworks` |
 | Kimi For Coding | `KIMI_API_KEY` | `kimi-coding` |
+| Cursor Subscription | `CURSOR_AGENT_TOKEN` or `CURSOR_ACCESS_TOKEN` | `cursor-not-cloud` |
 | Cursor (Cloud Agents) | `CURSOR_API_KEY` | `cursor` |
 | MiniMax | `MINIMAX_API_KEY` | `minimax` |
 | MiniMax (China) | `MINIMAX_CN_API_KEY` | `minimax-cn` |
@@ -232,7 +271,7 @@ export GOOGLE_CLOUD_LOCATION=us-central1
 
 Or set `GOOGLE_APPLICATION_CREDENTIALS` to a service account key file.
 
-### Cursor Cloud Agents
+### Cursor Cloud Agents (cloud RLM target)
 
 The `cursor` provider does not call a model endpoint. Each completion spawns (or resumes) a [Cursor cloud agent](https://cursor.com/docs/cloud-agent) run on a Cursor-hosted VM, and the agent's streamed reply is returned as the completion. No `/login`; the key comes from the environment:
 

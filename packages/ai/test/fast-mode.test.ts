@@ -23,6 +23,12 @@ describe("Fast mode", () => {
 		expect(supportsFastMode(model("openai-codex", id, "openai-codex-responses"))).toBe(true);
 	});
 
+	it("supports Cursor Grok without enabling fast for Cursor Kimi", () => {
+		expect(supportsFastMode(model("cursor-not-cloud", "cursor-grok-4.5-high", "cursor-not-cloud"))).toBe(true);
+		expect(supportsFastMode(model("cursor-not-cloud", "kimi-k3-max", "cursor-not-cloud"))).toBe(false);
+		expect(supportsFastMode(model("cursor", "cursor-grok-4.5-high", "cursor-cloud-agents"))).toBe(false);
+	});
+
 	it("rejects unsupported models and API-key providers", () => {
 		expect(supportsFastMode(model("openai-codex", "gpt-5.3-codex", "openai-codex-responses"))).toBe(false);
 		expect(supportsFastMode(model("openai-codex", "gpt-5.4-mini", "openai-codex-responses"))).toBe(false);

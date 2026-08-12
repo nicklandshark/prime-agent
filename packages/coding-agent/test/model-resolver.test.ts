@@ -425,6 +425,7 @@ describe("default model selection", () => {
 	test("openai defaults track current models", () => {
 		expect(defaultModelPerProvider.openai).toBe("gpt-5.4");
 		expect(defaultModelPerProvider["openai-codex"]).toBe("gpt-5.5");
+		expect(defaultModelPerProvider["cursor-not-cloud"]).toBe("cursor-grok-4.5-high");
 		expect(defaultModelPerProvider["prime-inference"]).toBe("z-ai/glm-5.2");
 	});
 
