@@ -11,7 +11,7 @@
  * compiled Bun binary), keyed off the __PI_BUNDLED__ define below, so extension
  * imports of pi packages share the bundle's module instances.
  */
-import { chmodSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,6 +19,13 @@ import { build } from "esbuild";
 
 const packageDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const outdir = join(packageDir, "dist", "bundle");
+const aiProviderDir = join(packageDir, "..", "ai", "dist", "providers");
+const entryPoints = {
+	cli: join(packageDir, "dist", "cli.js"),
+	"amazon-bedrock": join(aiProviderDir, "amazon-bedrock.js"),
+	"cursor/index": join(aiProviderDir, "cursor", "index.js"),
+	"cursor-not-cloud/index": join(aiProviderDir, "cursor-not-cloud", "index.js"),
+};
 let buildId;
 try {
 	buildId = execFileSync("git", ["describe", "--tags", "--always", "--dirty"], {
@@ -32,7 +39,10 @@ try {
 rmSync(outdir, { recursive: true, force: true });
 
 await build({
-	entryPoints: [join(packageDir, "dist", "cli.js")],
+	// register-builtins loads these Node-only providers through computed dynamic
+	// imports so browser bundles do not resolve them. Explicit entry points make
+	// those runtime-relative paths available in the CLI bundle.
+	entryPoints,
 	outdir,
 	bundle: true,
 	splitting: true,
@@ -49,4 +59,10 @@ await build({
 });
 
 chmodSync(join(outdir, "cli.js"), 0o755);
+for (const name of Object.keys(entryPoints)) {
+	const output = join(outdir, `${name}.js`);
+	if (!existsSync(output)) {
+		throw new Error(`Missing bundle entry point: ${output}`);
+	}
+}
 console.log("bundled dist/cli.js -> dist/bundle/");
