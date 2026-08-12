@@ -23,10 +23,15 @@ function source(valueFingerprint: string) {
 	} as const;
 }
 
-function callTray(token: { valueFingerprint: string } | undefined, thinking = "high", fast = true): string {
+function callTray(
+	token: { valueFingerprint: string } | undefined,
+	thinking = "high",
+	fast = true,
+	modelName = "Cursor Grok 4.5",
+): string {
 	const fakeThis = Object.create(InteractiveMode.prototype);
 	fakeThis.connectionState = {
-		model: { provider: "cursor-not-cloud", name: "Cursor Grok 4.5", reasoning: true },
+		model: { provider: "cursor-not-cloud", name: modelName, reasoning: true },
 		thinkingLevel: thinking,
 		serviceTier: fast ? "priority" : "default",
 	};
@@ -45,6 +50,10 @@ afterEach(() => {
 });
 
 describe("Cursor subscription account tray", () => {
+	it("labels Grok 4.6 with its resolved xhigh and fast state", () => {
+		expect(callTray(undefined, "xhigh", true, "Cursor Grok 4.6")).toBe("Cursor Grok 4.6 • xhigh • fast");
+	});
+
 	it("shows full verified local email with resolved thinking/fast and never crosses credential fingerprints", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "cursor-identity-"));
 		dirs.push(dir);

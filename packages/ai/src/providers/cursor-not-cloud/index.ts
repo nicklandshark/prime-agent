@@ -209,12 +209,12 @@ import {
 } from "./agent_pb.js";
 import {
 	$env,
-	canonicalCursorGrok45ModelId,
+	canonicalCursorGrokModelId,
 	connectProxiedSocket,
 	createRequestDebugSession,
 	deterministicUuid,
 	getProxyForProvider,
-	isCursorGrok45RouteId,
+	isCursorGrokRouteId,
 	isRequestDebugEnabled,
 	logger,
 	normalizeSystemPrompts,
@@ -226,7 +226,7 @@ import {
 	shouldBypassProxy,
 	toolWireSchema,
 } from "./compat.js";
-import { CURSOR_GROK_45_NORMAL_ROUTE_IDS, validateCursorAgentRoute } from "./discovery.js";
+import { CURSOR_GROK_NORMAL_ROUTE_IDS, validateCursorAgentRoute } from "./discovery.js";
 import * as AIError from "./errors.js";
 import {
 	buildMcpStateResult,
@@ -5069,12 +5069,12 @@ type CursorRootPromptAssistantContentPart =
 function canReplayCursorThinking(msg: AssistantMessage, targetModelId: string | undefined): boolean {
 	return (
 		targetModelId !== undefined &&
-		isCursorGrok45RouteId(targetModelId) &&
+		isCursorGrokRouteId(targetModelId) &&
 		msg.api === "cursor-not-cloud" &&
 		msg.provider === "cursor-not-cloud" &&
-		// Route-aware: a turn persisted under any Grok 4.5 route id (low/medium/high/fast)
-		// replays against any other route of the same logical model.
-		canonicalCursorGrok45ModelId(msg.model) === canonicalCursorGrok45ModelId(targetModelId)
+		// Route-aware: a turn persisted under any route id (reasoning level/fast) in the same Grok release
+		// replays against any other route of that logical model.
+		canonicalCursorGrokModelId(msg.model) === canonicalCursorGrokModelId(targetModelId)
 	);
 }
 
@@ -5108,12 +5108,12 @@ function buildCursorAssistantContent(
 	return content;
 }
 
-function assertCursorGrok45HistoryReplayable(
+function assertCursorGrokHistoryReplayable(
 	messages: Message[],
 	activeUserMessageIndex: number,
 	targetModelId: string | undefined,
 ): void {
-	if (!targetModelId || !isCursorGrok45RouteId(targetModelId)) return;
+	if (!targetModelId || !isCursorGrokRouteId(targetModelId)) return;
 	const historyEnd = activeUserMessageIndex >= 0 ? activeUserMessageIndex : messages.length;
 	const missingThinkingTurns: number[] = [];
 	const newlyWarnedKeys: string[] = [];
@@ -5125,7 +5125,7 @@ function assertCursorGrok45HistoryReplayable(
 		const isSameCursorModel =
 			msg.api === "cursor-not-cloud" &&
 			msg.provider === "cursor-not-cloud" &&
-			canonicalCursorGrok45ModelId(msg.model) === canonicalCursorGrok45ModelId(targetModelId);
+			canonicalCursorGrokModelId(msg.model) === canonicalCursorGrokModelId(targetModelId);
 		if (!isSameCursorModel) {
 			// Foreign history cannot replay Grok reasoning: another model's
 			// turns carry no compatible signed reasoning to reconstruct.
@@ -5143,7 +5143,7 @@ function assertCursorGrok45HistoryReplayable(
 	if (missingThinkingTurns.length === 0) return;
 	for (const key of newlyWarnedKeys) cursorConversationStateStore.markWarning(key);
 	logger.warn(
-		`Cursor Grok 4.5 history contains same-model assistant turn(s) ${missingThinkingTurns.join(", ")} without thinking blocks; replaying those spans without reasoning may make generation less stable`,
+		`Cursor ${targetModelId.startsWith("cursor-grok-4.6-") ? "Grok 4.6" : "Grok 4.5"} history contains same-model assistant turn(s) ${missingThinkingTurns.join(", ")} without thinking blocks; replaying those spans without reasoning may make generation less stable`,
 		{ model: targetModelId, assistantTurns: missingThinkingTurns },
 	);
 }
@@ -5198,7 +5198,7 @@ function buildRootPromptMessagesJson(
 	activeUserMessageIndex = findLastUserMessageIndex(messages),
 	targetModelId?: string,
 ): Uint8Array[] {
-	assertCursorGrok45HistoryReplayable(messages, activeUserMessageIndex, targetModelId);
+	assertCursorGrokHistoryReplayable(messages, activeUserMessageIndex, targetModelId);
 	const entries: Uint8Array[] = [...systemPromptIds];
 	const pushJson = (obj: unknown) => {
 		const bytes = new TextEncoder().encode(JSON.stringify(obj));
@@ -5686,30 +5686,37 @@ const CURSOR_GROK_FAST_ROUTES: Readonly<Record<string, string>> = {
 	"cursor-grok-4.5-low": "cursor-grok-4.5-low-fast",
 	"cursor-grok-4.5-medium": "cursor-grok-4.5-medium-fast",
 	"cursor-grok-4.5-high": "cursor-grok-4.5-high-fast",
+	"cursor-grok-4.6-low": "cursor-grok-4.6-low-fast",
+	"cursor-grok-4.6-medium": "cursor-grok-4.6-medium-fast",
+	"cursor-grok-4.6-high": "cursor-grok-4.6-high-fast",
+	"cursor-grok-4.6-xhigh": "cursor-grok-4.6-xhigh-fast",
 };
 
-const CURSOR_GROK_FAST_ROUTE_IDS: ReadonlySet<string> = new Set(Object.values(CURSOR_GROK_FAST_ROUTES));
+const CURSOR_FAST_ROUTE_SET: ReadonlySet<string> = new Set(Object.values(CURSOR_GROK_FAST_ROUTES));
 
-/**
- * Published Grok 4.5 Fast rates (https://cursor.com/docs/models/grok-4-5):
- * $4/M input, $18/M output — above the standard $2/$6 model metadata. Cursor publishes no separate cache price; cache usage remains unpriced.
- */
-const CURSOR_GROK_FAST_COST = { input: 4, output: 18 } as const;
+/** Published fast rates for each Cursor Grok model family, in USD/M tokens. */
+const CURSOR_GROK_FAST_COST: Readonly<Record<string, { input: number; output: number; cacheRead: number }>> = {
+	// https://cursor.com/docs/models/grok-4-5
+	"cursor-grok-4.5": { input: 4, output: 18, cacheRead: 0 },
+	// https://cursor.com/docs/models/grok-4-6
+	"cursor-grok-4.6": { input: 4, output: 12, cacheRead: 1 },
+};
 
 /** Concrete wire model a request runs against: the routed sibling id when reasoning/fast routing resolved one. */
 function resolveCursorWireModelId(model: Model<"cursor-not-cloud">, options: CursorOptions | undefined): string {
 	return resolveCursorAgentModelId(model, options);
 }
 
-/** Exported for tests: bill fast routes at fast rates, everything else at the model's standard metadata. */
+/** Exported for tests: bill fast routes at that Grok family's published fast rates. */
 export function calculateCursorAgentUsageCost(
 	model: Model<"cursor-not-cloud">,
 	wireModelId: string,
 	usage: Usage,
 ): Usage["cost"] {
-	const billed = CURSOR_GROK_FAST_ROUTE_IDS.has(wireModelId)
-		? { ...model, cost: { ...model.cost, ...CURSOR_GROK_FAST_COST } }
-		: model;
+	const fastCost = CURSOR_FAST_ROUTE_SET.has(wireModelId)
+		? CURSOR_GROK_FAST_COST[canonicalCursorGrokModelId(wireModelId)]
+		: undefined;
+	const billed = fastCost ? { ...model, cost: { ...model.cost, ...fastCost } } : model;
 	return calculateCost(billed, usage);
 }
 
@@ -5721,9 +5728,13 @@ export function resolveCursorAgentModelId(
 	const requested = options?.reasoning ?? "high";
 	const resolved = clampThinkingLevel(model, requested);
 	const mapped = model.thinkingLevelMap?.[resolved];
-	if (typeof mapped !== "string" || !CURSOR_GROK_45_NORMAL_ROUTE_IDS.some((route) => route === mapped)) {
+	if (
+		typeof mapped !== "string" ||
+		!CURSOR_GROK_NORMAL_ROUTE_IDS.some((route) => route === mapped) ||
+		canonicalCursorGrokModelId(mapped) !== canonicalCursorGrokModelId(model.id)
+	) {
 		throw new AIError.ProviderResponseError(
-			`Cursor Grok 4.5 does not expose a wire route for resolved reasoning level ${resolved}`,
+			`${model.name} does not expose a wire route for resolved reasoning level ${resolved}`,
 			{ provider: "cursor-not-cloud", kind: "capability" },
 		);
 	}
@@ -5759,6 +5770,12 @@ export {
 	CURSOR_GROK_45_FAST_ROUTE_IDS,
 	CURSOR_GROK_45_NORMAL_ROUTE_IDS,
 	CURSOR_GROK_45_ROUTE_IDS,
+	CURSOR_GROK_46_FAST_ROUTE_IDS,
+	CURSOR_GROK_46_NORMAL_ROUTE_IDS,
+	CURSOR_GROK_46_ROUTE_IDS,
+	CURSOR_GROK_FAST_ROUTE_IDS,
+	CURSOR_GROK_NORMAL_ROUTE_IDS,
+	CURSOR_GROK_ROUTE_IDS,
 	CursorDiscoveryError,
 	clearCursorAgentDiscoveryCache,
 	fetchCursorAgentModelIds,

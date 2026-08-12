@@ -78,8 +78,10 @@ afterEach(async () => {
 describe("cursor-not-cloud discovery", () => {
 	it("decodes raw protobuf, Connect unary, successful empty, and partial route catalogs", async () => {
 		const baseUrl = await startServer();
-		reply = { body: catalog("cursor-grok-4.5-low") };
-		expect(await fetchCursorAgentModelIds("fixture-a", { baseUrl })).toEqual(new Set(["cursor-grok-4.5-low"]));
+		reply = { body: catalog("cursor-grok-4.5-low", "cursor-grok-4.6-xhigh-fast") };
+		expect(await fetchCursorAgentModelIds("fixture-a", { baseUrl })).toEqual(
+			new Set(["cursor-grok-4.5-low", "cursor-grok-4.6-xhigh-fast"]),
+		);
 		reply = {
 			contentType: "application/connect+proto",
 			body: Buffer.concat([frame(catalog("cursor-grok-4.5-medium-fast")), frame(Buffer.from("{}"), 2)]),
@@ -201,6 +203,9 @@ describe("cursor-not-cloud discovery", () => {
 	it("validates the final selected normal or fast route without substitution", async () => {
 		await validateCursorAgentRoute("fixture-f", "cursor-grok-4.5-low", {
 			modelIds: new Set(["cursor-grok-4.5-low"]),
+		});
+		await validateCursorAgentRoute("fixture-f", "cursor-grok-4.6-xhigh-fast", {
+			modelIds: new Set(["cursor-grok-4.6-xhigh-fast"]),
 		});
 		await expect(
 			validateCursorAgentRoute("fixture-f", "cursor-grok-4.5-low-fast", {

@@ -50,13 +50,14 @@ export function toolWireSchema(tool: Tool): Record<string, unknown> {
 	return tool.parameters as unknown as Record<string, unknown>;
 }
 
-export function isCursorGrok45RouteId(modelId: string): boolean {
-	return /^cursor-grok-4\.5-(?:low|medium|high)(?:-fast)?$/.test(modelId);
+export function isCursorGrokRouteId(modelId: string): boolean {
+	return /^cursor-grok-4\.(?:5-(?:low|medium|high)|6-(?:low|medium|high|xhigh))(?:-fast)?$/.test(modelId);
 }
 
-/** Canonical logical-family key shared by Grok 4.5 reasoning and fast sibling routes. */
-export function canonicalCursorGrok45ModelId(modelId: string): string {
-	return isCursorGrok45RouteId(modelId) ? "cursor-grok-4.5" : modelId;
+/** Canonical logical-family key shared by a Grok release's reasoning and fast sibling routes. */
+export function canonicalCursorGrokModelId(modelId: string): string {
+	const match = /^cursor-grok-(4\.(?:5|6))-/.exec(modelId);
+	return match && isCursorGrokRouteId(modelId) ? `cursor-grok-${match[1]}` : modelId;
 }
 
 function isLocalOrMetadataHost(host: string): boolean {

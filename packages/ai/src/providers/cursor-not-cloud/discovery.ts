@@ -23,6 +23,27 @@ export const CURSOR_GROK_45_FAST_ROUTE_IDS = [
 ] as const;
 export const CURSOR_GROK_45_ROUTE_IDS = [...CURSOR_GROK_45_NORMAL_ROUTE_IDS, ...CURSOR_GROK_45_FAST_ROUTE_IDS] as const;
 
+export const CURSOR_GROK_46_NORMAL_ROUTE_IDS = [
+	"cursor-grok-4.6-low",
+	"cursor-grok-4.6-medium",
+	"cursor-grok-4.6-high",
+	"cursor-grok-4.6-xhigh",
+] as const;
+export const CURSOR_GROK_46_FAST_ROUTE_IDS = [
+	"cursor-grok-4.6-low-fast",
+	"cursor-grok-4.6-medium-fast",
+	"cursor-grok-4.6-high-fast",
+	"cursor-grok-4.6-xhigh-fast",
+] as const;
+export const CURSOR_GROK_46_ROUTE_IDS = [...CURSOR_GROK_46_NORMAL_ROUTE_IDS, ...CURSOR_GROK_46_FAST_ROUTE_IDS] as const;
+
+export const CURSOR_GROK_NORMAL_ROUTE_IDS = [
+	...CURSOR_GROK_45_NORMAL_ROUTE_IDS,
+	...CURSOR_GROK_46_NORMAL_ROUTE_IDS,
+] as const;
+export const CURSOR_GROK_FAST_ROUTE_IDS = [...CURSOR_GROK_45_FAST_ROUTE_IDS, ...CURSOR_GROK_46_FAST_ROUTE_IDS] as const;
+export const CURSOR_GROK_ROUTE_IDS = [...CURSOR_GROK_NORMAL_ROUTE_IDS, ...CURSOR_GROK_FAST_ROUTE_IDS] as const;
+
 export type CursorDiscoveryErrorKind =
 	| "timeout"
 	| "network"
@@ -285,9 +306,15 @@ export function clearCursorAgentDiscoveryCache(): void {
 	catalogCache.clear();
 }
 
-/** A logical Grok remains visible when any normal reasoning route is entitled. */
+/** A logical Grok remains visible when any normal reasoning route in its own family is entitled. */
 export function hasCursorAgentLogicalModelRoutes(logicalModelId: string, modelIds: ReadonlySet<string>): boolean {
-	return logicalModelId === "cursor-grok-4.5-high" && CURSOR_GROK_45_NORMAL_ROUTE_IDS.some((id) => modelIds.has(id));
+	const routes =
+		logicalModelId === "cursor-grok-4.5-high"
+			? CURSOR_GROK_45_NORMAL_ROUTE_IDS
+			: logicalModelId === "cursor-grok-4.6-high"
+				? CURSOR_GROK_46_NORMAL_ROUTE_IDS
+				: undefined;
+	return routes?.some((id) => modelIds.has(id)) ?? false;
 }
 
 export async function validateCursorAgentRoute(

@@ -6,10 +6,18 @@ import { createHarness } from "./harness.js";
 const cursorOptions = {
 	api: "cursor-not-cloud",
 	provider: "cursor-not-cloud",
-	models: [{ id: "cursor-grok-4.5-high", name: "Cursor Grok 4.5", reasoning: true }],
+	models: [
+		{ id: "cursor-grok-4.5-high", name: "Cursor Grok 4.5", reasoning: true },
+		{ id: "cursor-grok-4.6-high", name: "Cursor Grok 4.6", reasoning: true },
+	],
+};
+const cursor46Options = {
+	...cursorOptions,
+	models: [{ id: "cursor-grok-4.6-high", name: "Cursor Grok 4.6", reasoning: true }],
 };
 const realModel = getModel("cursor-not-cloud", "cursor-grok-4.5-high");
-if (!realModel) throw new Error("Cursor Grok model missing");
+const realModel46 = getModel("cursor-not-cloud", "cursor-grok-4.6-high");
+if (!realModel || !realModel46) throw new Error("Cursor Grok model missing");
 
 describe("RLM cursor-not-cloud reasoning and fast inheritance", () => {
 	it.each([
@@ -39,6 +47,35 @@ describe("RLM cursor-not-cloud reasoning and fast inheritance", () => {
 				expect(harness.session.getRlmChildSession(result.rlm_child_id)?.serviceTier).toBe(
 					expectedFast ? "priority" : "default",
 				);
+			});
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it.each([
+		["omitted inherits priority", "priority", undefined, true, "cursor-grok-4.6-xhigh-fast"],
+		["true enables priority", "default", true, true, "cursor-grok-4.6-xhigh-fast"],
+		["false forces default", "priority", false, false, "cursor-grok-4.6-xhigh"],
+	] as const)("Grok 4.6 %s", async (_name, parentTier, fast, expectedFast, expectedRoute) => {
+		const harness = await createHarness(cursor46Options);
+		try {
+			await harness.session.setModel(realModel46);
+			harness.session.setServiceTier(parentTier);
+			harness.setResponses([
+				(_context, options) => {
+					expect(resolveCursorAgentModelId(realModel46, options)).toBe(expectedRoute);
+					return fauxAssistantMessage("cursor child answer");
+				},
+			]);
+			const result = await harness.session.runRlmChild("run Grok 4.6 xhigh", {
+				thinking: "xhigh",
+				...(fast === undefined ? {} : { fast }),
+			});
+			expect(result).toMatchObject({
+				model: "cursor-not-cloud/cursor-grok-4.6-high",
+				thinking: "xhigh",
+				fast: expectedFast,
 			});
 		} finally {
 			harness.cleanup();

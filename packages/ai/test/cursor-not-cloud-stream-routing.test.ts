@@ -27,6 +27,22 @@ const matrix: Array<[ModelThinkingLevel, ServiceTier, string]> = [
 	["xhigh", "priority", "cursor-grok-4.5-high-fast"],
 	["max", "priority", "cursor-grok-4.5-high-fast"],
 ];
+const matrix46: Array<[ModelThinkingLevel, ServiceTier, string]> = [
+	["off", "default", "cursor-grok-4.6-low"],
+	["minimal", "default", "cursor-grok-4.6-low"],
+	["low", "default", "cursor-grok-4.6-low"],
+	["medium", "default", "cursor-grok-4.6-medium"],
+	["high", "default", "cursor-grok-4.6-high"],
+	["xhigh", "default", "cursor-grok-4.6-xhigh"],
+	["max", "default", "cursor-grok-4.6-xhigh"],
+	["off", "priority", "cursor-grok-4.6-low-fast"],
+	["minimal", "priority", "cursor-grok-4.6-low-fast"],
+	["low", "priority", "cursor-grok-4.6-low-fast"],
+	["medium", "priority", "cursor-grok-4.6-medium-fast"],
+	["high", "priority", "cursor-grok-4.6-high-fast"],
+	["xhigh", "priority", "cursor-grok-4.6-xhigh-fast"],
+	["max", "priority", "cursor-grok-4.6-xhigh-fast"],
+];
 const context: Context = { messages: [{ role: "user", content: "route", timestamp: 1 }] };
 let server: http2.Http2Server;
 let baseUrl: string;
@@ -75,8 +91,10 @@ beforeAll(async () => {
 
 afterAll(async () => await new Promise<void>((resolve) => server.close(() => resolve())));
 
-function fixtureModel(): Model<"cursor-not-cloud"> {
-	const model = getModel("cursor-not-cloud", "cursor-grok-4.5-high");
+function fixtureModel(
+	modelId: "cursor-grok-4.5-high" | "cursor-grok-4.6-high" = "cursor-grok-4.5-high",
+): Model<"cursor-not-cloud"> {
+	const model = getModel("cursor-not-cloud", modelId);
 	if (!model) throw new Error("missing model");
 	return { ...model, baseUrl };
 }
@@ -86,9 +104,10 @@ async function assertWireRoute(
 	reasoning: ModelThinkingLevel,
 	serviceTier: ServiceTier,
 	expected: string,
+	modelId: "cursor-grok-4.5-high" | "cursor-grok-4.6-high" = "cursor-grok-4.5-high",
 ): Promise<void> {
 	const before = seen.length;
-	const output = await dispatch(fixtureModel(), context, {
+	const output = await dispatch(fixtureModel(modelId), context, {
 		apiKey: "fixture-token",
 		reasoning,
 		serviceTier,
@@ -105,6 +124,14 @@ describe("cursor-not-cloud end-to-end route dispatch", () => {
 
 	it.each(matrix)("registered stream routes %s/%s to %s", async (reasoning, tier, expected) => {
 		await assertWireRoute(stream as typeof streamCursor, reasoning, tier, expected);
+	});
+
+	it.each(matrix46)("direct Grok 4.6 stream routes %s/%s to %s", async (reasoning, tier, expected) => {
+		await assertWireRoute(streamCursor, reasoning, tier, expected, "cursor-grok-4.6-high");
+	});
+
+	it.each(matrix46)("registered Grok 4.6 stream routes %s/%s to %s", async (reasoning, tier, expected) => {
+		await assertWireRoute(stream as typeof streamCursor, reasoning, tier, expected, "cursor-grok-4.6-high");
 	});
 
 	it("rejects an oversized initial Run payload before emitting a Connect frame", async () => {

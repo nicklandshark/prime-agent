@@ -45,12 +45,26 @@ describe("cursor-not-cloud partial catalog RLM resolution", () => {
 	test("keeps the logical model when any normal route is entitled without mutating route metadata", async () => {
 		getCatalog.mockResolvedValueOnce(catalog("cursor-grok-4.5-low"));
 		const executable = await registry().getExecutableModels();
-		const model = executable.find((candidate) => candidate.provider === "cursor-not-cloud");
-		expect(model?.id).toBe("cursor-grok-4.5-high");
+		const models = executable.filter((candidate) => candidate.provider === "cursor-not-cloud");
+		expect(models.map((model) => model.id)).toEqual(["cursor-grok-4.5-high"]);
+		const model = models[0];
 		expect(model?.thinkingLevelMap).toMatchObject({
 			low: "cursor-grok-4.5-low",
 			medium: "cursor-grok-4.5-medium",
 			high: "cursor-grok-4.5-high",
+		});
+	});
+
+	test("filters each logical Grok family independently for partial entitlements", async () => {
+		getCatalog.mockResolvedValueOnce(catalog("cursor-grok-4.5-high-fast", "cursor-grok-4.6-medium"));
+		const executable = await registry().getExecutableModels();
+		const models = executable.filter((candidate) => candidate.provider === "cursor-not-cloud");
+		expect(models.map((model) => model.id)).toEqual(["cursor-grok-4.6-high"]);
+		expect(models[0]?.thinkingLevelMap).toMatchObject({
+			low: "cursor-grok-4.6-low",
+			medium: "cursor-grok-4.6-medium",
+			high: "cursor-grok-4.6-high",
+			xhigh: "cursor-grok-4.6-xhigh",
 		});
 	});
 

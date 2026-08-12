@@ -40,7 +40,7 @@ export function supportsFastMode<TApi extends Api>(model: Model<TApi>): boolean 
 	if (
 		model.provider === "cursor-not-cloud" &&
 		model.api === "cursor-not-cloud" &&
-		model.id === "cursor-grok-4.5-high"
+		(model.id === "cursor-grok-4.5-high" || model.id === "cursor-grok-4.6-high")
 	) {
 		return true;
 	}

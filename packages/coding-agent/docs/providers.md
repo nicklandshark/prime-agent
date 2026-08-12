@@ -38,9 +38,9 @@ Anthropic subscription auth is active for Claude Pro/Max accounts. Third-party h
 
 ### Cursor Subscription (`cursor-not-cloud`)
 
-`cursor-not-cloud/cursor-grok-4.5-high` uses your Cursor subscription directly through Cursor's native
-AgentService endpoint at `https://api2.cursor.sh`. It is separate from the `cursor` Cloud Agents provider and
-never launches or shells out to the Cursor executable.
+`cursor-not-cloud/cursor-grok-4.5-high` and `cursor-not-cloud/cursor-grok-4.6-high` use your Cursor subscription
+directly through Cursor's native AgentService endpoint at `https://api2.cursor.sh`. They are separate from the
+`cursor` Cloud Agents provider and never launch or shell out to the Cursor executable.
 
 Authenticate with `/login`. Prime can read the official Cursor auth file **read-only** (override its path with
 `CURSOR_AGENT_AUTH_FILE`) or complete Cursor's browser PKCE flow. Prime imports only the access token; it never
@@ -52,13 +52,23 @@ The tray fetches the active account email through Cursor's authenticated `GetMe`
 credential fingerprint. Safe fallbacks are a matching official cached email, a shortened stable auth ID, then
 `Cursor subscription`. The full email appears only in the local tray and is not logged.
 
-Cursor reasoning is sibling-model routing:
+Cursor reasoning is sibling-model routing. Grok 4.5 exposes `low`, `medium`, and `high`; requests below `low`
+clamp to `low`, while `xhigh` and `max` clamp to `high`:
 
-| Prime request | Resolved tray/handle level | Normal route | Fast route |
+| Prime request | Resolved level | Normal route | Fast route |
 |---|---|---|---|
 | `off`, `minimal`, `low` | `low` | `cursor-grok-4.5-low` | `cursor-grok-4.5-low-fast` |
 | `medium` | `medium` | `cursor-grok-4.5-medium` | `cursor-grok-4.5-medium-fast` |
 | `high`, `xhigh`, `max` | `high` | `cursor-grok-4.5-high` | `cursor-grok-4.5-high-fast` |
+
+Grok 4.6 exposes `low`, `medium`, `high` (the default), and `xhigh`; `max` clamps to `xhigh`:
+
+| Prime request | Resolved level | Normal route | Fast route |
+|---|---|---|---|
+| `off`, `minimal`, `low` | `low` | `cursor-grok-4.6-low` | `cursor-grok-4.6-low-fast` |
+| `medium` | `medium` | `cursor-grok-4.6-medium` | `cursor-grok-4.6-medium-fast` |
+| `high` | `high` | `cursor-grok-4.6-high` | `cursor-grok-4.6-high-fast` |
+| `xhigh`, `max` | `xhigh` | `cursor-grok-4.6-xhigh` | `cursor-grok-4.6-xhigh-fast` |
 
 `/fast` selects the matching `-fast` sibling; it does not send a service-tier field. RLM children use the normal
 omitted/inherit, `fast=true`, and `fast=false` rules. Explicit `null` is invalid. Live discovery validates the final
@@ -69,9 +79,10 @@ a new remote conversation, but Prime reconstructs the request from the persisted
 tool calls/results. Current checkpoints report a 256,000-token context ceiling. The catalog's 64,000 `maxTokens` is
 a conservative local fallback and is not sent as a Cursor server output limit.
 
-Token costs shown by Prime are estimates, not Cursor subscription invoices: normal `$2/M` input and `$6/M` output;
-fast `$4/M` input and `$18/M` output. Cache usage is reported but unpriced because no reviewed primary source
-established a cache rate.
+Token costs shown by Prime are estimates, not Cursor subscription invoices. Grok 4.5 is normal `$2/M` input and
+`$6/M` output, or fast `$4/M` input and `$18/M` output; its reported cache usage remains unpriced. Grok 4.6 is
+normal `$2/M` input, `$0.50/M` cached input, and `$6/M` output, or fast `$4/M` input, `$1/M` cached input, and
+`$12/M` output.
 
 ## API Keys
 

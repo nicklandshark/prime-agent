@@ -131,6 +131,27 @@ describe("Cursor Agent state replay", () => {
 		expect(history.turnStepMessagesJson[0]).toHaveLength(2);
 	});
 
+	it("replays Grok 4.6 reasoning routes within 4.6 but rejects Grok 4.5 history", () => {
+		const messages: Message[] = [
+			{ role: "user", content: "prior question", timestamp: 1 },
+			assistant(
+				[
+					{ type: "thinking", thinking: "xhigh plan", thinkingSignature: "sig-46" },
+					{ type: "text", text: "answer" },
+				],
+				"cursor-grok-4.6-xhigh-fast",
+			),
+			{ role: "user", content: "active question", timestamp: 3 },
+		];
+
+		const history = buildCursorHistoryForTest(messages, 2, "cursor-grok-4.6-low");
+		expect(history.rootPromptMessagesJson[1]).toMatchObject({
+			role: "assistant",
+			content: expect.arrayContaining([expect.objectContaining({ type: "reasoning", text: "xhigh plan" })]),
+		});
+		expect(() => buildCursorHistoryForTest(messages, 2, "cursor-grok-4.5-high")).toThrow(/different model/);
+	});
+
 	it("still rejects genuinely foreign models in Grok 4.5 history", () => {
 		const messages: Message[] = [
 			{ role: "user", content: "prior question", timestamp: 1 },
