@@ -190,6 +190,30 @@ describe("Cursor Agent OAuth", () => {
 		expect(bytesRead).toBeLessThanOrEqual(1024);
 	});
 
+	it("continues when a pending response body cancellation never settles", async () => {
+		vi.useFakeTimers();
+		let calls = 0;
+		vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+			calls++;
+			if (calls === 1) {
+				return new Response(
+					new ReadableStream<Uint8Array>({
+						cancel: () => new Promise<void>(() => undefined),
+					}),
+					{ status: 404 },
+				);
+			}
+			return new Response(JSON.stringify({ accessToken: "a", refreshToken: "r" }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		});
+		const pending = pollCursorAuth("fixture-uuid", "fixture-verifier");
+		await vi.advanceTimersByTimeAsync(20_000);
+		await expect(pending).resolves.toEqual({ accessToken: "a" });
+		expect(calls).toBe(2);
+	});
+
 	it("polls through a pending 404 and aborts without leaking token material", async () => {
 		vi.useFakeTimers();
 		const fetchSpy = vi

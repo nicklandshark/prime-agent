@@ -9,6 +9,7 @@ const CURSOR_POLL_URL = "https://api2.cursor.sh/auth/poll";
 const POLL_MAX_ATTEMPTS = 150;
 const POLL_BASE_DELAY_MS = 1_000;
 const POLL_MAX_DELAY_MS = 10_000;
+const POLL_ATTEMPT_TIMEOUT_MS = 15_000;
 const TOKEN_EXPIRY_SKEW_MS = 5 * 60 * 1_000;
 const MAX_POLL_RESPONSE_BYTES = 64 * 1024;
 
@@ -87,6 +88,24 @@ function abortError(): Error {
 	return error;
 }
 
+function signalError(signal: AbortSignal): Error {
+	return signal.reason instanceof Error ? signal.reason : abortError();
+}
+
+async function racePollAttempt<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+	if (signal.aborted) throw signalError(signal);
+	let onAbort: (() => void) | undefined;
+	const aborted = new Promise<never>((_resolve, reject) => {
+		onAbort = () => reject(signalError(signal));
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
+	try {
+		return await Promise.race([promise, aborted]);
+	} finally {
+		if (onAbort) signal.removeEventListener("abort", onAbort);
+	}
+}
+
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 	if (signal?.aborted) return Promise.reject(abortError());
 	return new Promise((resolve, reject) => {
@@ -113,11 +132,11 @@ async function cancelPollBody(response: Response, reason: string, signal?: Abort
 	}
 	if (signal.aborted) {
 		void cancellation;
-		throw abortError();
+		throw signalError(signal);
 	}
 	let onAbort: (() => void) | undefined;
 	const aborted = new Promise<never>((_resolve, reject) => {
-		onAbort = () => reject(abortError());
+		onAbort = () => reject(signalError(signal));
 		signal.addEventListener("abort", onAbort, { once: true });
 	});
 	try {
@@ -180,34 +199,54 @@ export async function pollCursorAuth(
 	let consecutiveErrors = 0;
 	for (let attempt = 0; attempt < POLL_MAX_ATTEMPTS; attempt++) {
 		await sleep(delayMs, signal);
+		const attemptController = new AbortController();
+		const onCallerAbort = () => attemptController.abort(signal ? signalError(signal) : abortError());
+		if (signal?.aborted) onCallerAbort();
+		else signal?.addEventListener("abort", onCallerAbort, { once: true });
+		const attemptTimer = setTimeout(
+			() => attemptController.abort(new Error("Cursor authentication poll attempt timed out")),
+			POLL_ATTEMPT_TIMEOUT_MS,
+		);
 		try {
-			const response = await fetch(
-				`${CURSOR_POLL_URL}?uuid=${encodeURIComponent(uuid)}&verifier=${encodeURIComponent(verifier)}`,
-				{
-					signal,
-				},
+			const response = await racePollAttempt(
+				fetch(`${CURSOR_POLL_URL}?uuid=${encodeURIComponent(uuid)}&verifier=${encodeURIComponent(verifier)}`, {
+					signal: attemptController.signal,
+				}),
+				attemptController.signal,
 			);
 			if (response.status === 404) {
-				await cancelPollBody(response, "Cursor authentication is still pending", signal);
+				await cancelPollBody(response, "Cursor authentication is still pending", attemptController.signal);
 				consecutiveErrors = 0;
 				delayMs = Math.min(Math.ceil(delayMs * 1.2), POLL_MAX_DELAY_MS);
 				continue;
 			}
 			if (!response.ok) {
-				await cancelPollBody(response, "Cursor authentication response rejected by HTTP status", signal);
+				await cancelPollBody(
+					response,
+					"Cursor authentication response rejected by HTTP status",
+					attemptController.signal,
+				);
 				throw new Error(`Cursor authentication poll failed with HTTP ${response.status}`);
 			}
 			const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
 			if (contentType !== "application/json") {
-				await cancelPollBody(response, "Cursor authentication response content type rejected", signal);
+				await cancelPollBody(
+					response,
+					"Cursor authentication response content type rejected",
+					attemptController.signal,
+				);
 				throw new Error("Cursor authentication response had an unsupported content type");
 			}
 			const declaredLength = Number(response.headers.get("content-length") ?? 0);
 			if (declaredLength > MAX_POLL_RESPONSE_BYTES) {
-				await cancelPollBody(response, "Cursor authentication response declared length exceeded limit", signal);
+				await cancelPollBody(
+					response,
+					"Cursor authentication response declared length exceeded limit",
+					attemptController.signal,
+				);
 				throw new Error("Cursor authentication response was too large");
 			}
-			const payload = (await readBoundedPollJson(response)) as {
+			const payload = (await racePollAttempt(readBoundedPollJson(response), attemptController.signal)) as {
 				accessToken?: unknown;
 				refreshToken?: unknown;
 			};
@@ -221,6 +260,9 @@ export async function pollCursorAuth(
 			if (consecutiveErrors >= 3) {
 				throw error instanceof Error ? error : new Error(String(error));
 			}
+		} finally {
+			clearTimeout(attemptTimer);
+			signal?.removeEventListener("abort", onCallerAbort);
 		}
 	}
 	throw new Error("Cursor authentication timed out");
