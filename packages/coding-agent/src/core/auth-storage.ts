@@ -1345,6 +1345,7 @@ export class AuthStorage {
 	 */
 	private async refreshOAuthTokenWithLock(
 		providerId: OAuthProviderId,
+		force = false,
 	): Promise<{ apiKey: string; newCredentials: OAuthCredentials } | null> {
 		const provider = getOAuthProvider(providerId);
 		if (!provider) {
@@ -1369,7 +1370,7 @@ export class AuthStorage {
 				if (!pool || !active) {
 					return { result: null };
 				}
-				if (Date.now() < active.expires) {
+				if (!force && Date.now() < active.expires) {
 					return { result: { apiKey: provider.getApiKey(active), newCredentials: active } };
 				}
 				const refreshedCredentials = await provider.refreshToken(active);
@@ -1396,7 +1397,7 @@ export class AuthStorage {
 				};
 			}
 
-			if (Date.now() < cred.expires) {
+			if (!force && Date.now() < cred.expires) {
 				return { result: { apiKey: provider.getApiKey(cred), newCredentials: cred } };
 			}
 
@@ -1422,6 +1423,12 @@ export class AuthStorage {
 		});
 
 		return result;
+	}
+
+	/** Force a file-locked OAuth source re-read after a concrete provider 401/403. */
+	async forceRefreshOAuthToken(providerId: OAuthProviderId): Promise<string | undefined> {
+		const result = await this.refreshOAuthTokenWithLock(providerId, true);
+		return result?.apiKey;
 	}
 
 	/**

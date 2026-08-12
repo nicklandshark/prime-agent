@@ -14,6 +14,7 @@ import type { BedrockOptions } from "./amazon-bedrock.js";
 import type { AnthropicOptions } from "./anthropic.js";
 import type { AzureOpenAIResponsesOptions } from "./azure-openai-responses.js";
 import type { CursorOptions } from "./cursor/index.js";
+import type { CursorAgentOptions } from "./cursor-not-cloud/index.js";
 import type { GoogleOptions } from "./google.js";
 import type { GoogleVertexOptions } from "./google-vertex.js";
 import type { MistralOptions } from "./mistral.js";
@@ -92,6 +93,11 @@ interface CursorProviderModule {
 	streamSimpleCursor: StreamFunction<"cursor-cloud-agents", SimpleStreamOptions>;
 }
 
+interface CursorAgentProviderModule {
+	streamCursor: StreamFunction<"cursor-not-cloud", CursorAgentOptions>;
+	streamSimpleCursorAgent: StreamFunction<"cursor-not-cloud", SimpleStreamOptions>;
+}
+
 const importNodeOnlyProvider = (specifier: string): Promise<unknown> => import(specifier);
 
 let anthropicProviderModulePromise:
@@ -126,6 +132,9 @@ let bedrockProviderModulePromise:
 	| undefined;
 let cursorProviderModulePromise:
 	| Promise<LazyProviderModule<"cursor-cloud-agents", CursorOptions, SimpleStreamOptions>>
+	| undefined;
+let cursorAgentProviderModulePromise:
+	| Promise<LazyProviderModule<"cursor-not-cloud", CursorAgentOptions, SimpleStreamOptions>>
 	| undefined;
 
 export function setBedrockProviderModule(module: BedrockProviderModule): void {
@@ -342,6 +351,19 @@ function loadCursorProviderModule(): Promise<
 	return cursorProviderModulePromise;
 }
 
+function loadCursorAgentProviderModule(): Promise<
+	LazyProviderModule<"cursor-not-cloud", CursorAgentOptions, SimpleStreamOptions>
+> {
+	cursorAgentProviderModulePromise ||= importNodeOnlyProvider("./cursor-not-cloud/index.js").then((module) => {
+		const provider = module as CursorAgentProviderModule;
+		return {
+			stream: provider.streamCursor,
+			streamSimple: provider.streamSimpleCursorAgent,
+		};
+	});
+	return cursorAgentProviderModulePromise;
+}
+
 export const streamAnthropic = createLazyStream(loadAnthropicProviderModule);
 export const streamSimpleAnthropic = createLazySimpleStream(loadAnthropicProviderModule);
 export const streamAzureOpenAIResponses = createLazyStream(loadAzureOpenAIResponsesProviderModule);
@@ -362,6 +384,8 @@ const streamBedrockLazy = createLazyStream(loadBedrockProviderModule);
 const streamSimpleBedrockLazy = createLazySimpleStream(loadBedrockProviderModule);
 export const streamCursor = createLazyStream(loadCursorProviderModule);
 export const streamSimpleCursor = createLazySimpleStream(loadCursorProviderModule);
+export const streamCursorAgent = createLazyStream(loadCursorAgentProviderModule);
+export const streamSimpleCursorAgent = createLazySimpleStream(loadCursorAgentProviderModule);
 
 export function registerBuiltInApiProviders(): void {
 	registerApiProvider({
@@ -422,6 +446,12 @@ export function registerBuiltInApiProviders(): void {
 		api: "cursor-cloud-agents",
 		stream: streamCursor,
 		streamSimple: streamSimpleCursor,
+	});
+
+	registerApiProvider({
+		api: "cursor-not-cloud",
+		stream: streamCursorAgent,
+		streamSimple: streamSimpleCursorAgent,
 	});
 }
 

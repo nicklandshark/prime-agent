@@ -4001,6 +4001,28 @@ export const MODELS = {
 			maxTokens: 262144,
 		} satisfies Model<"openai-completions">,
 	},
+	"cursor-not-cloud": {
+		"cursor-grok-4.6-high": {
+			id: "cursor-grok-4.6-high",
+			name: "Cursor Grok 4.6",
+			api: "cursor-not-cloud",
+			provider: "cursor-not-cloud",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"cursor-grok-4.6-low","medium":"cursor-grok-4.6-medium","high":"cursor-grok-4.6-high","xhigh":"cursor-grok-4.6-xhigh","max":null},
+			input: ["text"],
+			// Published model-pool estimates (USD/M tokens), not Cursor subscription invoices.
+			cost: {
+				input: 2,
+				output: 6,
+				cacheRead: 0.5,
+				cacheWrite: 0,
+			},
+			contextWindow: 256000,
+			maxTokens: 64000,
+			featured: true,
+		} satisfies Model<"cursor-not-cloud">,
+	},
 	"cursor": {
 		"auto": {
 			id: "auto",

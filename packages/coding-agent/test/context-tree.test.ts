@@ -162,6 +162,25 @@ describe("loadContextTreeChildrenFromDisk", () => {
 		expect(unresolved[0].contextUsage).toBeUndefined();
 	});
 
+	it("prefers authoritative persisted provider occupancy and estimates only trailing messages", () => {
+		const rlmDir = makeTempDir();
+		const usage = { ...createUsage(1500, 500, 0.02), contextTokens: 90_000, contextMaxTokens: 180_000 };
+		const child = writeChildSession(join(rlmDir, "sub-authctx1"), "authoritative", createUsage(100, 50, 0.01));
+		child.sessionManager.appendMessage(createAssistantMessage("authoritative checkpoint", usage));
+		let nodes = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
+		expect(nodes[0].contextUsage).toEqual({ tokens: 90_000, contextWindow: 180_000, percent: 50 });
+		child.sessionManager.appendMessage({
+			...createAssistantMessage("failed terminal text is not accepted context", createUsage(999_999, 1, 0)),
+			stopReason: "error",
+		});
+		nodes = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
+		expect(nodes[0].contextUsage?.tokens).toBe(90_000);
+		child.sessionManager.appendMessage(createUserMessage("genuinely trailing unsent text"));
+		nodes = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
+		expect(nodes[0].contextUsage?.tokens).toBeGreaterThan(90_000);
+		expect(nodes[0].contextUsage?.contextWindow).toBe(180_000);
+	});
+
 	it("reports unknown context usage after a trailing compaction", () => {
 		const rlmDir = makeTempDir();
 		const child = writeChildSession(join(rlmDir, "sub-comp0001"), "compact me", createUsage(1500, 500, 0.02));
@@ -334,6 +353,22 @@ describe("AgentSession.getContextTree", () => {
 	function syncAgentMessages(session: AgentSession, sessionManager: SessionManager): void {
 		session.agent.state.messages = sessionManager.buildSessionContext().messages;
 	}
+
+	it("prefers live authoritative provider occupancy over billable token totals", () => {
+		const { session, sessionManager } = createSession();
+		sessionManager.appendMessage(createUserMessage("live context"));
+		sessionManager.appendMessage(
+			createAssistantMessage("done", {
+				...createUsage(100, 50, 0.01),
+				contextTokens: 80_000,
+				contextMaxTokens: 160_000,
+			}),
+		);
+		syncAgentMessages(session, sessionManager);
+		const tree = session.getContextTree();
+		expect(tree.contextUsage).toEqual({ tokens: 80_000, contextWindow: 160_000, percent: 50 });
+		session.dispose();
+	});
 
 	it("returns a root node whose own usage excludes attributed child usage", () => {
 		const { session, sessionManager } = createSession();

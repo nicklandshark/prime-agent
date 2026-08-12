@@ -1,6 +1,7 @@
 import { Agent, type StreamFn } from "@earendil-works/pi-agent-core";
 import type { Context, Model, SimpleStreamOptions, StreamOptions } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage, registerFauxProvider, streamSimpleCursor } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai";
+import { streamSimpleCursor } from "@earendil-works/pi-ai/cursor";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../../src/core/agent-session.js";
 import type { HostRequestHandlers } from "../../src/core/kernel/index.js";

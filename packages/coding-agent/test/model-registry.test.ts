@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { AnthropicMessagesCompat, Api, Context, Model, OpenAICompletionsCompat } from "@earendil-works/pi-ai";
 import { getApiProvider } from "@earendil-works/pi-ai";
 import { getOAuthProvider, registerOAuthProvider } from "@earendil-works/pi-ai/oauth";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { clearApiKeyCache, ModelRegistry, type ProviderConfigInput } from "../src/core/model-registry.js";
 
@@ -1683,5 +1683,25 @@ describe("ModelRegistry", () => {
 				}
 			});
 		});
+	});
+});
+
+describe("cursor cloud/subscription catalog coexistence", () => {
+	test("shows cursor-not-cloud in user catalogs while preserving cloud hiding and RLM availability", async () => {
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 200 }));
+		const auth = AuthStorage.inMemory();
+		auth.setRuntimeApiKey("cursor-not-cloud", "fixture-subscription-access");
+		auth.setRuntimeApiKey("cursor", "fixture-cloud-key");
+		const registry = ModelRegistry.inMemory(auth);
+		const snapshot = await registry.refreshModelCatalog();
+		const cursorSubscriptionModels = snapshot.models.filter((model) => model.provider === "cursor-not-cloud");
+		expect(cursorSubscriptionModels.map((model) => model.id)).toEqual(["cursor-grok-4.6-high"]);
+		expect(cursorSubscriptionModels[0]?.contextWindow).toBe(256000);
+		expect(snapshot.models.some((model) => model.provider === "cursor")).toBe(false);
+		expect(snapshot.configuredProviders).toContain("cursor-not-cloud");
+		expect(snapshot.configuredProviders).not.toContain("cursor");
+		expect(registry.getAvailable().some((model) => model.provider === "cursor")).toBe(true);
+		expect(registry.getAvailable().some((model) => model.provider === "cursor-not-cloud")).toBe(true);
+		vi.restoreAllMocks();
 	});
 });

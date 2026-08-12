@@ -31,6 +31,7 @@
 			"!**/node_modules/**/*",
 			"!**/test-sessions.ts",
 			"!**/models.generated.ts",
+			"!packages/ai/src/providers/cursor-not-cloud/agent_pb.ts",
 			"!packages/mom/data/**/*",
 			"!!**/node_modules",
 			"!.worktrees",

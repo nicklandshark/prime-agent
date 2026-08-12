@@ -1,4 +1,7 @@
 import {
+	type AssistantMessage,
+	type CursorExecHandlers,
+	type CursorToolResultHandler,
 	createAssistantMessageDiagnostic,
 	type ImageContent,
 	type Message,
@@ -7,7 +10,9 @@ import {
 	streamSimple,
 	type TextContent,
 	type ThinkingBudgets,
+	type ToolResultMessage,
 	type Transport,
+	validateToolArguments,
 } from "@earendil-works/pi-ai";
 import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.js";
 import type {
@@ -19,6 +24,9 @@ import type {
 	AgentMessage,
 	AgentState,
 	AgentTool,
+	AgentToolCall,
+	AgentToolResult,
+	AgentToolUpdateCallback,
 	BeforeToolCallContext,
 	BeforeToolCallResult,
 	GetContinuationMessagesContext,
@@ -115,6 +123,44 @@ export interface AgentOptions {
 	transport?: Transport;
 	maxRetryDelayMs?: number;
 	toolExecution?: ToolExecutionMode;
+	cursorExecHandlers?: CursorExecHandlers;
+	cursorOnToolResult?: CursorToolResultHandler;
+}
+
+interface CursorToolResultEntry {
+	toolResult: ToolResultMessage;
+	pending?: Promise<void>;
+}
+
+export interface ExternalToolExecutionResult {
+	result: AgentToolResult<unknown>;
+	isError: boolean;
+}
+
+function externalToolError(message: string): AgentToolResult<unknown> {
+	return { content: [{ type: "text", text: message }], details: {} };
+}
+
+async function raceExternalToolWithAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+	if (!signal) return await work;
+	if (signal.aborted) {
+		void work.catch(() => {});
+		throw new Error("Tool execution aborted");
+	}
+	return await new Promise<T>((resolve, reject) => {
+		const abort = () => reject(new Error("Tool execution aborted"));
+		signal.addEventListener("abort", abort, { once: true });
+		work.then(
+			(value) => {
+				signal.removeEventListener("abort", abort);
+				resolve(value);
+			},
+			(error) => {
+				signal.removeEventListener("abort", abort);
+				reject(error);
+			},
+		);
+	});
 }
 
 class PendingMessageQueue {
@@ -184,6 +230,7 @@ export class Agent {
 	private readonly listeners = new Set<(event: AgentEvent, signal: AbortSignal) => Promise<void> | void>();
 	private readonly steeringQueue: PendingMessageQueue;
 	private readonly followUpQueue: PendingMessageQueue;
+	private readonly externalTools = new Map<string, AgentTool<any>>();
 
 	public convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	public transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
@@ -216,6 +263,9 @@ export class Agent {
 	public maxRetryDelayMs?: number;
 	/** Tool execution strategy for assistant messages that contain multiple tool calls. */
 	public toolExecution: ToolExecutionMode;
+	private cursorExecHandlers?: CursorExecHandlers;
+	private cursorOnToolResult?: CursorToolResultHandler;
+	private cursorToolResultBuffer: CursorToolResultEntry[] = [];
 
 	constructor(options: AgentOptions = {}) {
 		this._state = createMutableAgentState(options.initialState);
@@ -237,6 +287,184 @@ export class Agent {
 		this.transport = options.transport ?? "auto";
 		this.maxRetryDelayMs = options.maxRetryDelayMs;
 		this.toolExecution = options.toolExecution ?? "parallel";
+		this.cursorExecHandlers = options.cursorExecHandlers;
+		this.cursorOnToolResult = options.cursorOnToolResult;
+	}
+
+	/** Configure the Cursor Agent in-stream execution bridge for this session. */
+	setCursorAgentBridge(handlers: CursorExecHandlers, onToolResult?: CursorToolResultHandler): void {
+		this.cursorExecHandlers = handlers;
+		this.cursorOnToolResult = onToolResult;
+	}
+
+	/** Register a hidden provider-owned AgentTool without advertising it to the model. */
+	setExternalTool(tool: AgentTool<any>): void {
+		this.externalTools.set(tool.name, tool);
+	}
+
+	/** Emit a provider-owned tool/message event through the normal Agent lifecycle. */
+	async emitExternalEvent(event: AgentEvent): Promise<void> {
+		await this.processEvents(event);
+	}
+
+	private externalToolInvocation(
+		toolName: string,
+		toolCallId: string,
+		args: Record<string, unknown>,
+	): {
+		tool: AgentTool<any>;
+		toolCall: AgentToolCall;
+		assistantMessage: AssistantMessage;
+		context: AgentContext;
+		validatedArgs: unknown;
+	} {
+		const tool =
+			this.externalTools.get(toolName) ?? this._state.tools.find((candidate) => candidate.name === toolName);
+		if (!tool) throw new Error(`Tool ${toolName} not found`);
+		let toolCall: AgentToolCall = { type: "toolCall", id: toolCallId, name: toolName, arguments: args };
+		if (tool.prepareArguments) {
+			toolCall = { ...toolCall, arguments: tool.prepareArguments(toolCall.arguments) as Record<string, unknown> };
+		}
+		const validatedArgs = validateToolArguments(tool, toolCall);
+		const streaming = this._state.streamingMessage;
+		const assistantMessage: AssistantMessage =
+			streaming?.role === "assistant"
+				? {
+						...streaming,
+						content: streaming.content.some((item) => item.type === "toolCall" && item.id === toolCallId)
+							? streaming.content.map((item) =>
+									item.type === "toolCall" && item.id === toolCallId ? toolCall : item,
+								)
+							: [...streaming.content, toolCall],
+					}
+				: {
+						role: "assistant",
+						content: [toolCall],
+						api: this._state.model.api,
+						provider: this._state.model.provider,
+						model: this._state.model.id,
+						usage: { ...EMPTY_USAGE, cost: { ...EMPTY_USAGE.cost } },
+						stopReason: "toolUse",
+						timestamp: Date.now(),
+					};
+		const context: AgentContext = {
+			systemPrompt: this._state.systemPrompt,
+			messages: this._state.messages,
+			tools: [...this._state.tools, ...this.externalTools.values()],
+		};
+		return { tool, toolCall, assistantMessage, context, validatedArgs };
+	}
+
+	/** Ask the normal tool policy hook whether a provider-owned call may run. */
+	async approveExternalTool(toolName: string, toolCallId: string, args: Record<string, unknown>): Promise<boolean> {
+		try {
+			const invocation = this.externalToolInvocation(toolName, toolCallId, args);
+			if (!this.beforeToolCall) return true;
+			const decision = await raceExternalToolWithAbort(
+				this.beforeToolCall(
+					{
+						assistantMessage: invocation.assistantMessage,
+						toolCall: invocation.toolCall,
+						args: invocation.validatedArgs,
+						context: invocation.context,
+					},
+					this.signal,
+				),
+				this.signal,
+			);
+			return decision?.block !== true;
+		} catch {
+			return false;
+		}
+	}
+
+	/** Execute a provider-owned call through validation, policy, cancellation, and post hooks. */
+	async executeExternalTool(
+		toolName: string,
+		toolCallId: string,
+		args: Record<string, unknown>,
+		onUpdate?: AgentToolUpdateCallback<unknown>,
+		skipBeforeToolCall = false,
+		externalSignal?: AbortSignal,
+	): Promise<ExternalToolExecutionResult> {
+		const executionSignal =
+			this.signal && externalSignal
+				? AbortSignal.any([this.signal, externalSignal])
+				: (externalSignal ?? this.signal);
+		let invocation: ReturnType<Agent["externalToolInvocation"]>;
+		try {
+			invocation = this.externalToolInvocation(toolName, toolCallId, args);
+			if (this.beforeToolCall && !skipBeforeToolCall) {
+				const decision = await raceExternalToolWithAbort(
+					this.beforeToolCall(
+						{
+							assistantMessage: invocation.assistantMessage,
+							toolCall: invocation.toolCall,
+							args: invocation.validatedArgs,
+							context: invocation.context,
+						},
+						executionSignal,
+					),
+					executionSignal,
+				);
+				if (decision?.block) {
+					return { result: externalToolError(decision.reason || "Tool execution was blocked"), isError: true };
+				}
+			}
+		} catch (error) {
+			return {
+				result: externalToolError(error instanceof Error ? error.message : String(error)),
+				isError: true,
+			};
+		}
+
+		let result: AgentToolResult<unknown>;
+		let isError = false;
+		let acceptingUpdates = true;
+		try {
+			if (executionSignal?.aborted) throw new Error("Tool execution aborted");
+			result = await raceExternalToolWithAbort(
+				invocation.tool.execute(toolCallId, invocation.validatedArgs as never, executionSignal, (update) => {
+					if (acceptingUpdates && !executionSignal?.aborted) onUpdate?.(update);
+				}),
+				executionSignal,
+			);
+		} catch (error) {
+			result = externalToolError(error instanceof Error ? error.message : String(error));
+			isError = true;
+		} finally {
+			acceptingUpdates = false;
+		}
+		if (this.afterToolCall) {
+			try {
+				const updated = await raceExternalToolWithAbort(
+					this.afterToolCall(
+						{
+							assistantMessage: invocation.assistantMessage,
+							toolCall: invocation.toolCall,
+							args: invocation.validatedArgs,
+							result,
+							isError,
+							context: invocation.context,
+						},
+						executionSignal,
+					),
+					executionSignal,
+				);
+				if (updated) {
+					result = {
+						content: updated.content ?? result.content,
+						details: updated.details ?? result.details,
+						terminate: updated.terminate ?? result.terminate,
+					};
+					isError = updated.isError ?? isError;
+				}
+			} catch (error) {
+				result = externalToolError(error instanceof Error ? error.message : String(error));
+				isError = true;
+			}
+		}
+		return { result, isError };
 	}
 
 	/**
@@ -470,6 +698,28 @@ export class Agent {
 
 	private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
 		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
+		// Cursor resolves exec-channel tools while the assistant message is still
+		// streaming. Reserve each result synchronously, then persist it only after
+		// the assistant message so transcript replay keeps call/result ordering.
+		const cursorOnToolResult = async (message: ToolResultMessage) => {
+			const entry: CursorToolResultEntry = { toolResult: message };
+			this.cursorToolResultBuffer.push(entry);
+			const transform = this.cursorOnToolResult;
+			if (transform) {
+				const pending = (async () => {
+					try {
+						const updated = await transform(message);
+						if (updated) entry.toolResult = updated;
+					} catch {
+						// Keep the reserved original result when a rewrite hook fails.
+					}
+				})();
+				entry.pending = pending;
+				await pending;
+				entry.pending = undefined;
+			}
+			return entry.toolResult;
+		};
 		return {
 			model: this._state.model,
 			reasoning: this._state.thinkingLevel === "off" ? undefined : this._state.thinkingLevel,
@@ -481,6 +731,8 @@ export class Agent {
 			thinkingBudgets: this.thinkingBudgets,
 			maxRetryDelayMs: this.maxRetryDelayMs,
 			toolExecution: this.toolExecution,
+			cursorExecHandlers: this.cursorExecHandlers,
+			cursorOnToolResult,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
 			shouldStopAfterTurn: async (context) => this.shouldStopAfterTurn?.(context) ?? false,
@@ -514,6 +766,7 @@ export class Agent {
 		this.activeRun = { promise, resolve: resolvePromise, abortController };
 
 		this._state.isStreaming = true;
+		this.cursorToolResultBuffer = [];
 		this._state.streamingMessage = undefined;
 		this._state.errorMessage = undefined;
 
@@ -563,6 +816,7 @@ export class Agent {
 	 * and `finishRun()` clears runtime-owned state.
 	 */
 	private async processEvents(event: AgentEvent): Promise<void> {
+		let bufferedCursorResults: ToolResultMessage[] = [];
 		switch (event.type) {
 			case "message_start":
 				this._state.streamingMessage = event.message;
@@ -574,6 +828,13 @@ export class Agent {
 
 			case "message_end":
 				this._state.streamingMessage = undefined;
+				if (event.message.role === "assistant" && this.cursorToolResultBuffer.length > 0) {
+					const buffer = this.cursorToolResultBuffer;
+					this.cursorToolResultBuffer = [];
+					const pending = buffer.flatMap((entry) => (entry.pending ? [entry.pending] : []));
+					if (pending.length > 0) await Promise.all(pending);
+					bufferedCursorResults = buffer.map((entry) => entry.toolResult);
+				}
 				this._state.messages.push(event.message);
 				break;
 
@@ -608,6 +869,15 @@ export class Agent {
 		}
 		for (const listener of this.listeners) {
 			await listener(event, signal);
+		}
+
+		// Persist provider-owned results after the assistant carrying their
+		// synthesized calls. Recursive processing preserves normal lifecycle
+		// events for storage/UI listeners without letting the agent loop execute
+		// the calls a second time.
+		for (const result of bufferedCursorResults) {
+			await this.processEvents({ type: "message_start", message: result });
+			await this.processEvents({ type: "message_end", message: result });
 		}
 	}
 }

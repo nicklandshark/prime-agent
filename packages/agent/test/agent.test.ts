@@ -1,4 +1,11 @@
-import { type AssistantMessage, type AssistantMessageEvent, EventStream, getModel } from "@earendil-works/pi-ai";
+import {
+	type AssistantMessage,
+	type AssistantMessageEvent,
+	EventStream,
+	getModel,
+	kCursorExecResolved,
+	type ToolResultMessage,
+} from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -9,6 +16,22 @@ import {
 	type AgentTool,
 	agentLoop,
 } from "../src/index.js";
+
+type TestPromiseWithResolvers<T> = {
+	promise: Promise<T>;
+	resolve: (value: T | PromiseLike<T>) => void;
+	reject: (reason?: unknown) => void;
+};
+
+function testPromiseWithResolvers<T>(): TestPromiseWithResolvers<T> {
+	let resolve!: (value: T | PromiseLike<T>) => void;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<T>((res, rej) => {
+		resolve = res;
+		reject = rej;
+	});
+	return { promise, resolve, reject };
+}
 
 // Mock stream that mimics AssistantMessageEventStream
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
@@ -729,5 +752,228 @@ describe("Agent", () => {
 
 		await agent.prompt("hello");
 		expect(receivedServiceTier).toBe("priority");
+	});
+});
+
+describe("Cursor Agent provider-owned tool execution", () => {
+	it("uses normal validation and before/after hooks for exec-channel tools", async () => {
+		const calls: string[] = [];
+		const schema = Type.Object({ value: Type.Number() });
+		const tool: AgentTool<typeof schema, { value: number }> = {
+			name: "native-tool",
+			label: "native-tool",
+			description: "fixture",
+			parameters: schema,
+			execute: async (_id, args) => {
+				calls.push(`execute:${args.value}`);
+				return { content: [{ type: "text", text: String(args.value) }], details: { value: args.value } };
+			},
+		};
+		let execution: Awaited<ReturnType<Agent["executeExternalTool"]>> | undefined;
+		let agent!: Agent;
+		agent = new Agent({
+			initialState: { tools: [tool] },
+			beforeToolCall: async ({ args }) => {
+				calls.push(`before:${(args as { value: number }).value}`);
+				return undefined;
+			},
+			afterToolCall: async ({ result }) => {
+				calls.push("after");
+				return { content: [...result.content, { type: "text", text: "hooked" }] };
+			},
+			streamFn: () => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(async () => {
+					stream.push({ type: "start", partial: createAssistantMessage("") });
+					execution = await agent.executeExternalTool("native-tool", "cursor-native-1", { value: 7 });
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("done") });
+				});
+				return stream;
+			},
+		});
+
+		await agent.prompt("run");
+
+		expect(calls).toEqual(["before:7", "execute:7", "after"]);
+		expect(execution?.isError).toBe(false);
+		expect(execution?.result.content).toEqual([
+			{ type: "text", text: "7" },
+			{ type: "text", text: "hooked" },
+		]);
+	});
+
+	it("cancels an exec-channel tool even when the tool ignores its abort signal", async () => {
+		const started = testPromiseWithResolvers<void>();
+		const schema = Type.Object({});
+		const tool: AgentTool<typeof schema> = {
+			name: "native-hang",
+			label: "native-hang",
+			description: "fixture",
+			parameters: schema,
+			execute: async () => {
+				started.resolve();
+				return await new Promise(() => {});
+			},
+		};
+		let execution: Awaited<ReturnType<Agent["executeExternalTool"]>> | undefined;
+		let agent!: Agent;
+		agent = new Agent({
+			initialState: { tools: [tool] },
+			streamFn: () => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(async () => {
+					stream.push({ type: "start", partial: createAssistantMessage("") });
+					execution = await agent.executeExternalTool("native-hang", "cursor-native-hang", {});
+					stream.push({ type: "error", reason: "aborted", error: createAssistantMessage("aborted") });
+				});
+				return stream;
+			},
+		});
+
+		const prompt = agent.prompt("run");
+		await started.promise;
+		agent.abort();
+		await prompt;
+
+		expect(execution?.isError).toBe(true);
+		expect(execution?.result.content).toEqual([{ type: "text", text: "Tool execution aborted" }]);
+		expect(agent.state.isStreaming).toBe(false);
+	});
+
+	it("returns a typed error when the normal tool policy blocks execution", async () => {
+		let executions = 0;
+		const schema = Type.Object({});
+		const tool: AgentTool<typeof schema> = {
+			name: "blocked-tool",
+			label: "blocked-tool",
+			description: "fixture",
+			parameters: schema,
+			execute: async () => {
+				executions++;
+				return { content: [], details: {} };
+			},
+		};
+		const agent = new Agent({
+			initialState: { tools: [tool] },
+			beforeToolCall: async () => ({ block: true, reason: "policy denied" }),
+		});
+
+		await expect(agent.approveExternalTool("blocked-tool", "cursor-native-2", {})).resolves.toBe(false);
+		const execution = await agent.executeExternalTool("blocked-tool", "cursor-native-2", {});
+
+		expect(executions).toBe(0);
+		expect(execution).toMatchObject({
+			isError: true,
+			result: { content: [{ type: "text", text: "policy denied" }] },
+		});
+	});
+});
+
+describe("Cursor Agent transcript ownership", () => {
+	it("persists provider-owned tool results after synthesized calls without executing them twice", async () => {
+		let executions = 0;
+		const toolCall = {
+			type: "toolCall" as const,
+			id: "cursor-exec-1",
+			name: "server-owned",
+			arguments: { value: 1 },
+			[kCursorExecResolved]: true as const,
+		};
+		const assistant: AssistantMessage = {
+			...createAssistantMessage("done"),
+			api: "cursor-not-cloud",
+			provider: "cursor-not-cloud",
+			content: [toolCall],
+			stopReason: "toolUse",
+		};
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			content: [{ type: "text", text: "executed in Cursor exec channel" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		const lifecycle: string[] = [];
+		const agent = new Agent({
+			initialState: {
+				tools: [
+					{
+						name: toolCall.name,
+						label: "must not run",
+						description: "must not run",
+						parameters: Type.Object({}),
+						execute: async () => {
+							executions++;
+							return { content: [{ type: "text", text: "duplicate" }], details: {} };
+						},
+					} satisfies AgentTool<any>,
+				],
+			},
+			streamFn: (_model, _context, options) => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(async () => {
+					stream.push({ type: "start", partial: assistant });
+					await options?.cursorOnToolResult?.(result);
+					stream.push({ type: "done", reason: "toolUse", message: assistant });
+				});
+				return stream;
+			},
+		});
+		agent.subscribe((event) => {
+			if (event.type === "message_end") lifecycle.push(`end:${event.message.role}`);
+		});
+
+		await agent.prompt("run it");
+
+		expect(executions).toBe(0);
+		expect(agent.state.messages.slice(-2)).toEqual([assistant, result]);
+		expect(lifecycle.slice(-2)).toEqual(["end:assistant", "end:toolResult"]);
+	});
+
+	it("awaits an async result rewrite before persisting the reserved result", async () => {
+		const toolCall = {
+			type: "toolCall" as const,
+			id: "cursor-exec-transform",
+			name: "server-owned",
+			arguments: {},
+			[kCursorExecResolved]: true as const,
+		};
+		const assistant: AssistantMessage = {
+			...createAssistantMessage(""),
+			api: "cursor-not-cloud",
+			provider: "cursor-not-cloud",
+			content: [toolCall],
+			stopReason: "toolUse",
+		};
+		const original: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			content: [{ type: "text", text: "original" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		const agent = new Agent({
+			cursorOnToolResult: async (message) => {
+				await new Promise((resolve) => setTimeout(resolve, 5));
+				return { ...message, content: [{ type: "text", text: "rewritten" }] };
+			},
+			streamFn: (_model, _context, options) => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(async () => {
+					stream.push({ type: "start", partial: assistant });
+					await options?.cursorOnToolResult?.(original);
+					stream.push({ type: "done", reason: "toolUse", message: assistant });
+				});
+				return stream;
+			},
+		});
+
+		await agent.prompt("run it");
+		const persisted = agent.state.messages.at(-1);
+		expect(persisted?.role).toBe("toolResult");
+		if (persisted?.role !== "toolResult") throw new Error("expected persisted tool result");
+		expect(persisted.content).toEqual([{ type: "text", text: "rewritten" }]);
 	});
 });

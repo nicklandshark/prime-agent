@@ -102,6 +102,10 @@ function getApiKeyEnvVars(provider: string): readonly string[] | undefined {
 		return ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"];
 	}
 
+	if (provider === "cursor-not-cloud") {
+		return ["CURSOR_AGENT_TOKEN", "CURSOR_ACCESS_TOKEN"];
+	}
+
 	const envMap: Record<string, string> = {
 		openai: "OPENAI_API_KEY",
 		"azure-openai-responses": "AZURE_OPENAI_API_KEY",
