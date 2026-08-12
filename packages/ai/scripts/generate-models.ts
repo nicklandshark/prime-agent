@@ -1802,7 +1802,7 @@ async function generateModels() {
 				cacheRead: 0,
 				cacheWrite: 0,
 			},
-			contextWindow: 128000,
+			contextWindow: 256000,
 			maxTokens: 16384,
 		});
 	}
