@@ -8,6 +8,7 @@ import type { AgentExecutionMode } from "./agent-session-config.js";
 import { installAgentTraceUpload } from "./agent-traces.js";
 import { AuthStorage } from "./auth-storage.js";
 import type { AgentAutonomousConfig } from "./autonomous.js";
+import type { ContextWindowOverrides } from "./context-window.js";
 import type { AgentRlmHeartbeatController } from "./cron-jobs.js";
 import { createHerdrAgentStateExtension } from "./extensions/builtin/herdr-agent-state.js";
 import type { SessionStartEvent, ToolDefinition } from "./extensions/index.js";
@@ -48,6 +49,14 @@ export interface AgentSessionCreationOptions {
 	thinkingLevel?: ThinkingLevel;
 	serviceTier?: ServiceTier;
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
+	/**
+	 * Session-local effective context windows, keyed by provider id.
+	 *
+	 * Only the CLI/daemon root-creation path sets this (see
+	 * rootContextWindowOverrides). It is deliberately absent from
+	 * resolveRuntimeSessionOptions so no subagent runtime can inherit it.
+	 */
+	contextWindowOverrides?: ContextWindowOverrides;
 	tools?: string[];
 	noTools?: "all" | "builtin";
 	customTools?: ToolDefinition[];
@@ -237,6 +246,7 @@ export async function createAgentSessionFromServices(
 		thinkingLevel: options.thinkingLevel,
 		serviceTier: options.serviceTier,
 		scopedModels: options.scopedModels,
+		contextWindowOverrides: options.contextWindowOverrides,
 		tools: options.tools,
 		noTools: options.noTools,
 		customTools: options.customTools,

@@ -106,6 +106,7 @@ import {
 	loadContextTreeChildFromDisk,
 	loadContextTreeChildrenFromDisk,
 } from "./context-tree.js";
+import { type ContextWindowOverrides, contextWindowOverrideFor, effectiveContextWindowFor } from "./context-window.js";
 import type { AgentCronJob, AgentRlmHeartbeatController, AgentRlmHeartbeatStatusUpdate } from "./cron-jobs.js";
 import { normalizeHeartbeatDeliveryMode } from "./cron-jobs.js";
 import { createCursorDeleteTool } from "./cursor-not-cloud/delete-tool.js";
@@ -399,6 +400,15 @@ export interface AgentSessionConfig {
 	cwd: string;
 	agentDir?: string;
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
+	/**
+	 * Session-local effective context windows, keyed by provider id.
+	 *
+	 * Overrides the raw catalog window for models of that provider in this
+	 * session only; the model objects and the registry are left untouched, so
+	 * RLM subagents created from this session keep the raw window. The CLI/daemon
+	 * sets this for rlmDepth 0 roots; SDK sessions default to the raw window.
+	 */
+	contextWindowOverrides?: ContextWindowOverrides;
 	resourceLoader: ResourceLoader;
 	customTools?: ToolDefinition[];
 	modelRegistry: ModelRegistry;
@@ -1016,6 +1026,9 @@ export class AgentSession {
 		thinkingLevel?: ThinkingLevel;
 	}>;
 
+	/** Provider-keyed effective context windows for this session only. */
+	private readonly _contextWindowOverrides?: ContextWindowOverrides;
+
 	private _unsubscribeAgent?: () => void;
 	private _unsubscribeOpenAICodexAccounts?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
@@ -1199,6 +1212,9 @@ export class AgentSession {
 		this.settingsManager = config.settingsManager;
 		this._serviceTierPreference = config.serviceTierPreference ?? config.agent.state.serviceTier;
 		this._scopedModels = config.scopedModels ?? [];
+		// Copied, not aliased: an override map handed in by the CLI must not be
+		// mutable from outside the session it belongs to.
+		this._contextWindowOverrides = config.contextWindowOverrides ? { ...config.contextWindowOverrides } : undefined;
 		this._resourceLoader = config.resourceLoader;
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
@@ -2593,7 +2609,7 @@ export class AgentSession {
 		const settings = this.settingsManager.getCompactionSettings();
 		if (!settings.enabled) return false;
 
-		const contextWindow = this.model?.contextWindow ?? 0;
+		const contextWindow = this.effectiveContextWindow;
 		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
 		const compactionTimestamp = compactionEntry ? new Date(compactionEntry.timestamp).getTime() : undefined;
 		if (compactionTimestamp !== undefined && context.message.timestamp <= compactionTimestamp) {
@@ -4036,6 +4052,19 @@ export class AgentSession {
 
 	get model(): Model<any> | undefined {
 		return this.agent.state.model;
+	}
+
+	/**
+	 * Context window this session plans against.
+	 *
+	 * The single source of truth for compaction thresholds, overflow detection,
+	 * retry classification and /context. It resolves the session-local provider
+	 * override when one applies to the *current* model, so a /model switch is
+	 * picked up immediately and providers without an override stay truthful.
+	 * Returns 0 when no model is selected, matching the previous read sites.
+	 */
+	get effectiveContextWindow(): number {
+		return effectiveContextWindowFor(this.model, this._contextWindowOverrides);
 	}
 
 	get thinkingLevel(): ThinkingLevel {
@@ -7903,7 +7932,7 @@ export class AgentSession {
 		}
 
 		const settings = this.settingsManager.getCompactionSettings();
-		const contextWindow = this.model?.contextWindow ?? 0;
+		const contextWindow = this.effectiveContextWindow;
 
 		// Skip overflow check if the message came from a different model.
 		// This handles the case where user switched from a smaller-context model (e.g. opus)
@@ -9962,7 +9991,8 @@ export class AgentSession {
 	private _isRetryableError(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error" || !message.errorMessage) return false;
 
-		const contextWindow = this.model?.contextWindow ?? 0;
+		// Context overflow is handled by compaction, not retry
+		const contextWindow = this.effectiveContextWindow;
 		if (isContextOverflow(message, contextWindow)) return false;
 
 		// Subscription quota exhaustion is terminal: the provider already had
@@ -10905,7 +10935,17 @@ export class AgentSession {
 				break;
 			}
 		}
-		const contextWindow = authoritative?.usage.contextMaxTokens ?? model.contextWindow ?? 0;
+		// An explicit session-local override outranks the provider-reported ceiling.
+		// `authoritative` is the newest assistant with contextTokens on the branch
+		// regardless of which model produced it, so after a /model switch it can
+		// carry a previous provider's contextMaxTokens; letting that win would
+		// silently defeat the root's Codex window. Providers without an override
+		// keep the provider-reported value, which is more accurate than the catalog.
+		const contextWindow =
+			contextWindowOverrideFor(model, this._contextWindowOverrides) ??
+			authoritative?.usage.contextMaxTokens ??
+			model.contextWindow ??
+			0;
 		if (contextWindow <= 0) return undefined;
 		if (authoritative) {
 			const trailingMessages = branchEntries

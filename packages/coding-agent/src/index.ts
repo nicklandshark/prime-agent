@@ -47,6 +47,13 @@ export {
 	serializeConversation,
 	shouldCompact,
 } from "./core/compaction/index.js";
+export {
+	type ContextWindowOverrides,
+	contextWindowOverrideFor,
+	effectiveContextWindowFor,
+	ROOT_OPENAI_CODEX_CONTEXT_WINDOW,
+	rootContextWindowOverrides,
+} from "./core/context-window.js";
 export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.js";
 // Extension system
 export type {

@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Changed top-level OpenAI Codex sessions to plan against a 1M-token context window while RLM subagents retain their raw catalog windows.
 - Fixed compaction silently retaining the whole context when trailing tool results exceed the recent-token budget ([#1549](https://github.com/PrimeIntellect-ai/prime-agent/pull/1549) by [@Jiaaqiliu](https://github.com/Jiaaqiliu)).
 - Fixed bundled installs omitting the lazy-loaded Amazon Bedrock and Cursor provider entry points.
 - Added Cursor subscription login, account status, and Grok 4.6 model support through the native AgentService provider ([#6](https://github.com/nicklandshark/prime-agent/pull/6) by [@nicklandshark](https://github.com/nicklandshark)).

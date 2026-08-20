@@ -53,6 +53,7 @@ import {
 } from "./core/agent-session-services.js";
 import { formatNoModelsAvailableMessage } from "./core/auth-guidance.js";
 import { AuthStorage } from "./core/auth-storage.js";
+import { rootContextWindowOverrides } from "./core/context-window.js";
 import { exportFromFile } from "./core/export-html/index.js";
 import type { ExtensionFactory } from "./core/extensions/types.js";
 import { KeybindingsManager } from "./core/keybindings.js";
@@ -698,6 +699,10 @@ export function resolveRuntimeSessionOptions(
 		thinkingLevel: runtimeSessionOptions?.thinkingLevel ?? sessionOptions.thinkingLevel,
 		serviceTier: runtimeSessionOptions?.serviceTier ?? sessionOptions.serviceTier,
 		scopedModels: runtimeSessionOptions?.scopedModels ?? sessionOptions.scopedModels,
+		// contextWindowOverrides is deliberately NOT resolved here. It is a
+		// root-only session-local policy injected at createRuntime; carrying it
+		// through this merge would hand the root's 1M Codex window to every
+		// subagent runtime, which creates sessions through the same factory.
 		tools: runtimeSessionOptions?.tools ?? sessionOptions.tools,
 		noTools: runtimeSessionOptions?.noTools ?? sessionOptions.noTools,
 		customTools: runtimeSessionOptions?.customTools ?? sessionOptions.customTools,
@@ -1302,6 +1307,10 @@ export async function main(args: string[], options?: MainOptions) {
 			telemetryDisabled: config.telemetryDisabled,
 			// Only seed initial goal for top-level sessions (rlmDepth 0).
 			initialGoal: (runtimeSessionOptions?.rlmDepth ?? 0) === 0 ? config.initialGoal : undefined,
+			// Root-only effective context windows (OpenAI Codex at 1M). Returns
+			// undefined for every subagent depth, and this is the only place that
+			// sets it, so children keep the raw catalog window.
+			contextWindowOverrides: rootContextWindowOverrides(runtimeSessionOptions?.rlmDepth),
 		});
 		const cliThinkingOverride = config.thinking !== undefined || prepared.cliThinkingFromModel;
 		if (created.session.model && cliThinkingOverride) {
