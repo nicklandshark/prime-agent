@@ -63,9 +63,6 @@ class SlashCommandMarkdown implements Component {
 	}
 }
 
-/**
- * Component that renders a user message
- */
 export class UserMessageComponent extends Container {
 	private contentBox: Box;
 

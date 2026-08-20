@@ -5,6 +5,14 @@
 - Added a native Cursor subscription provider with Grok 4.6 reasoning and fast routes ([#6](https://github.com/nicklandshark/prime-agent/pull/6) by [@nicklandshark](https://github.com/nicklandshark)).
 - Added a `cursor` provider (`cursor-cloud-agents` API) that runs each completion as a Cursor cloud agent run over the REST v1 API, with logical models `cloud-agent`, `composer-2.5`, and `auto`, repo config via `CURSOR_CLOUD_REPO(S)`, an editable `CURSOR_TUNNEL_PREAMBLE` injected into new agents, and agent/run ids surfaced as `responseId` (`bc-.../run-...`).
 
+## [0.7.4] - 2026-08-19
+
+## [0.7.3] - 2026-08-17
+
+- Added provider-derived reasoning levels for OpenRouter and Prime Inference models, including sparse, mandatory, toggle-only, and explicit-off capabilities.
+- Added Qwen 3.8 Max to the featured Prime Inference catalog ([#1247](https://github.com/PrimeIntellect-ai/prime-agent/pull/1247) by [@eliebak](https://github.com/eliebak)).
+- Refreshed generated provider catalogs, removed retired routes, and aligned provider defaults and cross-provider handoff fixtures with models currently served.
+
 ## [0.7.2] - 2026-08-11
 
 ## [0.7.1] - 2026-08-07

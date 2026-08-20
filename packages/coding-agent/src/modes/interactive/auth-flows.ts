@@ -1,12 +1,3 @@
-/**
- * Provider authentication flows (login/logout dialogs and selectors).
- *
- * Extracted from InteractiveMode so any TUI surface that owns a `TUI` and a
- * `ModelRegistry` (interactive sessions, the agents view) can run the same
- * auth UI. Host-specific side effects (footer refresh, billing warnings) hang
- * off the small host interface instead of the flows themselves.
- */
-
 import * as path from "node:path";
 import { getProviders, type OAuthProviderId, type OAuthSelectPrompt } from "@earendil-works/pi-ai";
 import type { OverlayHandle, TUI } from "@earendil-works/pi-tui";
@@ -70,7 +61,6 @@ function isAnthropicSubscriptionAuthKey(apiKey: string | undefined): boolean {
 	return typeof apiKey === "string" && apiKey.startsWith("sk-ant-oat");
 }
 
-/** Returns the extra-usage warning when the given model would run on Anthropic subscription auth. */
 export async function getAnthropicSubscriptionAuthWarning(
 	modelRegistry: ModelRegistry,
 	model: { provider: string } | undefined,
@@ -129,10 +119,10 @@ export interface ProviderLoginOptions {
 	initialCategory?: AuthSelectorCategory;
 }
 
+/** Shared auth dialogs: host-specific refresh and billing effects remain outside the flow. */
 export class ProviderAuthFlows {
 	constructor(private readonly host: ProviderAuthFlowsHost) {}
 
-	/** Runs the provider selector followed by the matching login dialog. */
 	/**
 	 * Run the OAuth login flow for an MCP integration server.
 	 *
@@ -203,8 +193,6 @@ export class ProviderAuthFlows {
 		return this.showApiKeyLoginDialog(providerOption.id, providerOption.name, kind);
 	}
 
-	/** Shows the stored-credential selector and removes the chosen credential. */
-	/** Returns the provider id that was logged out, or null if nothing changed (cancelled / none). */
 	runLogout(): Promise<string | null> {
 		const providerOptions = this.getLogoutProviderOptions();
 		if (providerOptions.length === 0) {
@@ -374,15 +362,7 @@ export class ProviderAuthFlows {
 	}
 
 	private async showBedrockSetupDialog(providerId: string, providerName: string): Promise<AuthenticationResult> {
-		const dialog = new LoginDialogComponent(
-			this.host.ui,
-			providerId,
-			() => {
-				// Completion handled below.
-			},
-			providerName,
-			"Amazon Bedrock setup",
-		);
+		const dialog = new LoginDialogComponent(this.host.ui, providerId, () => {}, providerName, "Amazon Bedrock setup");
 		const handle = showFullPaneOverlay(this.host.ui, dialog, 88);
 		const closeDialog = () => {
 			handle.hide();
@@ -541,9 +521,7 @@ export class ProviderAuthFlows {
 		const dialog = new LoginDialogComponent(
 			this.host.ui,
 			PRIME_INFERENCE_PROVIDER_ID,
-			(_success, _message) => {
-				// Completion handled below.
-			},
+			(_success, _message) => {},
 			PRIME_INFERENCE_PROVIDER_NAME,
 		);
 
@@ -660,9 +638,7 @@ export class ProviderAuthFlows {
 		const dialog = new LoginDialogComponent(
 			this.host.ui,
 			PRIME_AGENT_TRACES_PROVIDER_ID,
-			(_success, _message) => {
-				// Completion handled below.
-			},
+			(_success, _message) => {},
 			PRIME_AGENT_TRACES_PROVIDER_NAME,
 		);
 
@@ -767,14 +743,7 @@ export class ProviderAuthFlows {
 		providerName: string,
 		kind: "provider" | "service" = "provider",
 	): Promise<AuthenticationResult> {
-		const dialog = new LoginDialogComponent(
-			this.host.ui,
-			providerId,
-			(_success, _message) => {
-				// Completion handled below
-			},
-			providerName,
-		);
+		const dialog = new LoginDialogComponent(this.host.ui, providerId, (_success, _message) => {}, providerName);
 
 		const handle = showFullPaneOverlay(this.host.ui, dialog, 88);
 
@@ -978,7 +947,6 @@ export class ProviderAuthFlows {
 			manualCodeReject = reject;
 		});
 
-		// Close dialog overlay helper.
 		const closeDialog = () => {
 			dialogHandle.hide();
 			this.host.ui.requestRender();
@@ -990,7 +958,6 @@ export class ProviderAuthFlows {
 					dialog.showAuth(info.url, info.instructions);
 
 					if (usesCallbackServer) {
-						// Show input for manual paste, racing with callback
 						dialog
 							.showManualInput("Paste redirect URL below, or complete login in browser:")
 							.then((value) => {
@@ -1006,10 +973,8 @@ export class ProviderAuthFlows {
 								}
 							});
 					} else if (providerId === "github-copilot") {
-						// GitHub Copilot polls after onAuth
 						dialog.showWaiting("Waiting for browser authentication...");
 					}
-					// For Anthropic: onPrompt is called immediately after
 				},
 
 				onPrompt: async (prompt: { message: string; placeholder?: string }) => {
@@ -1027,7 +992,6 @@ export class ProviderAuthFlows {
 				signal: dialog.signal,
 			});
 
-			// Success
 			closeDialog();
 			return await this.completeProviderAuthentication(providerId, providerName, "oauth", undefined, kind);
 		} catch (error: unknown) {

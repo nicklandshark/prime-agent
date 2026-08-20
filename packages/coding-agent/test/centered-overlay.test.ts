@@ -11,9 +11,7 @@ class TestComponent implements Component, Focusable {
 	focused = false;
 	readonly inputs: string[] = [];
 
-	invalidate(): void {
-		// Test component has no cached render state.
-	}
+	invalidate(): void {}
 
 	render(width: number): string[] {
 		return [`content ${width}`, "second row"];
