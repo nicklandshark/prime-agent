@@ -384,12 +384,10 @@ export function findCutPoint(
 		const messageTokens = estimateTokens(entry.message);
 		accumulatedTokens += messageTokens;
 		if (accumulatedTokens >= keepRecentTokens) {
-			for (let c = 0; c < cutPoints.length; c++) {
-				if (cutPoints[c] >= i) {
-					cutIndex = cutPoints[c];
-					break;
-				}
-			}
+			// Tool results are never valid cut points, so when a turn's trailing
+			// results exceed the budget there may be no cut point at or after i.
+			// Keep from the newest valid cut point instead of retaining the whole window.
+			cutIndex = cutPoints.find((candidate) => candidate >= i) ?? cutPoints[cutPoints.length - 1];
 			break;
 		}
 	}

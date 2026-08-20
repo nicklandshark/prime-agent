@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed compaction silently retaining the whole context when trailing tool results exceed the recent-token budget ([#1549](https://github.com/PrimeIntellect-ai/prime-agent/pull/1549) by [@Jiaaqiliu](https://github.com/Jiaaqiliu)).
 - Fixed bundled installs omitting the lazy-loaded Amazon Bedrock and Cursor provider entry points.
 - Added Cursor subscription login, account status, and Grok 4.6 model support through the native AgentService provider ([#6](https://github.com/nicklandshark/prime-agent/pull/6) by [@nicklandshark](https://github.com/nicklandshark)).
 - Added a `cursor` provider that converses with Cursor cloud agents as a model backend (`CURSOR_API_KEY` + `CURSOR_CLOUD_REPO`; default model `cloud-agent`), documented in `docs/providers.md`.

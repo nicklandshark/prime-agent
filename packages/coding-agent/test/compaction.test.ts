@@ -67,6 +67,33 @@ function createAssistantMessage(text: string, usage?: Usage): AssistantMessage {
 	};
 }
 
+function createAssistantWithToolCalls(text: string, toolCallIds: string[]): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [
+			{ type: "text", text },
+			...toolCallIds.map((id) => ({ type: "toolCall" as const, id, name: "bash", arguments: {} })),
+		],
+		usage: createMockUsage(100, 50),
+		stopReason: "toolUse",
+		timestamp: Date.now(),
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: "claude-sonnet-4-5",
+	};
+}
+
+function createToolResultMessage(toolCallId: string, bytes: number): AgentMessage {
+	return {
+		role: "toolResult",
+		toolCallId,
+		toolName: "bash",
+		content: [{ type: "text", text: "z".repeat(bytes) }],
+		isError: false,
+		timestamp: Date.now(),
+	};
+}
+
 let entryCounter = 0;
 let lastId: string | null = null;
 
@@ -169,6 +196,17 @@ function extractText(messages: AgentMessage[]): string {
 			}
 		})
 		.join("\n");
+}
+
+function expectMatchingToolCallsAndResults(messages: AgentMessage[], expectedIds: string[]): void {
+	const callIds = messages.flatMap((message) =>
+		message.role === "assistant"
+			? message.content.filter((block) => block.type === "toolCall").map((block) => block.id)
+			: [],
+	);
+	const resultIds = messages.flatMap((message) => (message.role === "toolResult" ? [message.toolCallId] : []));
+	expect(callIds).toEqual(expectedIds);
+	expect(resultIds).toEqual(expectedIds);
 }
 
 // ============================================================================
@@ -310,6 +348,23 @@ describe("findCutPoint", () => {
 		expect(entries[result.firstKeptEntryIndex].type).toBe("message");
 		const role = (entries[result.firstKeptEntryIndex] as SessionMessageEntry).message.role;
 		expect(role === "user" || role === "assistant").toBe(true);
+	});
+
+	it("keeps the newest turn when trailing tool results exceed the budget", () => {
+		const entries: SessionEntry[] = [
+			createMessageEntry(createUserMessage("Turn 1")),
+			createMessageEntry(createAssistantMessage("A1")),
+			createMessageEntry(createUserMessage("Turn 2")),
+			createMessageEntry(createAssistantWithToolCalls("running two commands", ["tc1", "tc2"])),
+			createMessageEntry(createToolResultMessage("tc1", 60 * 1024)),
+			createMessageEntry(createToolResultMessage("tc2", 60 * 1024)),
+		];
+
+		const result = findCutPoint(entries, 0, entries.length, DEFAULT_COMPACTION_SETTINGS.keepRecentTokens);
+
+		expect(result.firstKeptEntryIndex).toBe(3);
+		expect(result.isSplitTurn).toBe(true);
+		expect(result.turnStartIndex).toBe(2);
 	});
 
 	it("should return startIndex if no valid cut points in range", () => {
@@ -458,7 +513,96 @@ describe("prepareCompaction with small sessions", () => {
 	});
 });
 
+describe("prepareCompaction with oversized trailing tool results", () => {
+	it("prepares and replays a smaller provider-valid context", () => {
+		const oldUser = createMessageEntry(createUserMessage("old request"));
+		const oldAssistant = createMessageEntry(createAssistantWithToolCalls("checking", ["old-tc"]));
+		const oldResult = createMessageEntry(createToolResultMessage("old-tc", 1024));
+		const oldCompletion = createMessageEntry(createAssistantMessage("old work complete"));
+		const currentUser = createMessageEntry(createUserMessage("current request"));
+		const currentAssistant = createMessageEntry(createAssistantWithToolCalls("running two commands", ["tc1", "tc2"]));
+		const firstResult = createMessageEntry(createToolResultMessage("tc1", 60 * 1024));
+		const secondResult = createMessageEntry(createToolResultMessage("tc2", 60 * 1024));
+		const entries: SessionEntry[] = [
+			oldUser,
+			oldAssistant,
+			oldResult,
+			oldCompletion,
+			currentUser,
+			currentAssistant,
+			firstResult,
+			secondResult,
+		];
+		const contextBefore = buildSessionContext(entries);
+
+		const preparation = prepareCompaction(entries, DEFAULT_COMPACTION_SETTINGS);
+
+		expect(preparation).toBeDefined();
+		expect(preparation!.firstKeptEntryId).toBe(currentAssistant.id);
+		expect(preparation!.isSplitTurn).toBe(true);
+		expect(preparation!.messagesToSummarize).toEqual([
+			oldUser.message,
+			oldAssistant.message,
+			oldResult.message,
+			oldCompletion.message,
+		]);
+		expect(preparation!.turnPrefixMessages).toEqual([currentUser.message]);
+
+		const compaction: CompactionEntry = {
+			type: "compaction",
+			id: "compaction-replay-id",
+			parentId: secondResult.id,
+			timestamp: new Date().toISOString(),
+			summary: "generated history and turn-prefix summary",
+			firstKeptEntryId: preparation!.firstKeptEntryId,
+			tokensBefore: preparation!.tokensBefore,
+		};
+		const replayed = buildSessionContext([...entries, compaction]);
+
+		expect(replayed.messages.map((message) => message.role)).toEqual([
+			"compactionSummary",
+			"assistant",
+			"toolResult",
+			"toolResult",
+		]);
+		expect(replayed.messages.length).toBeLessThan(contextBefore.messages.length);
+		expectMatchingToolCallsAndResults(replayed.messages, ["tc1", "tc2"]);
+	});
+});
+
 describe("prepareCompaction with previous compaction", () => {
+	it("moves the boundary after oversized trailing results instead of preparing a no-op update", () => {
+		const summarizedUser = createMessageEntry(createUserMessage("already summarized request"));
+		const summarizedAssistant = createMessageEntry(createAssistantMessage("already summarized answer"));
+		const previouslyKeptUser = createMessageEntry(createUserMessage("previously kept request"));
+		const previouslyKeptAssistant = createMessageEntry(createAssistantMessage("previously kept answer"));
+		const previousCompaction = createCompactionEntry("prior summary", previouslyKeptUser.id);
+		const currentUser = createMessageEntry(createUserMessage("current request"));
+		const currentAssistant = createMessageEntry(createAssistantWithToolCalls("running two commands", ["tc1", "tc2"]));
+		const firstResult = createMessageEntry(createToolResultMessage("tc1", 60 * 1024));
+		const secondResult = createMessageEntry(createToolResultMessage("tc2", 60 * 1024));
+		const entries: SessionEntry[] = [
+			summarizedUser,
+			summarizedAssistant,
+			previouslyKeptUser,
+			previouslyKeptAssistant,
+			previousCompaction,
+			currentUser,
+			currentAssistant,
+			firstResult,
+			secondResult,
+		];
+
+		const preparation = prepareCompaction(entries, DEFAULT_COMPACTION_SETTINGS);
+
+		expect(preparation).toBeDefined();
+		expect(preparation!.previousSummary).toBe("prior summary");
+		expect(preparation!.firstKeptEntryId).toBe(currentAssistant.id);
+		expect(preparation!.firstKeptEntryId).not.toBe(previouslyKeptUser.id);
+		expect(preparation!.messagesToSummarize).toEqual([previouslyKeptUser.message, previouslyKeptAssistant.message]);
+		expect(preparation!.turnPrefixMessages).toEqual([currentUser.message]);
+	});
+
 	it("should preserve kept messages across repeated compactions when they still fit", () => {
 		const u1 = createMessageEntry(createUserMessage("user msg 1 (summarized by compaction1)"));
 		const a1 = createMessageEntry(createAssistantMessage("assistant msg 1"));
