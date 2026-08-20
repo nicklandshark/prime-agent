@@ -894,7 +894,12 @@ describe("ENG-4509 side questions", () => {
 				renderResyncedSession(
 					this: typeof fakeThis,
 					snapshot: {
-						state: { isCompacting: boolean; isBashRunning: boolean; isStreaming: boolean };
+						state: {
+							isCompacting: boolean;
+							isBashRunning: boolean;
+							isStreaming: boolean;
+							sessionActions: { queuedCount: number; steering: string[]; followUps: string[] };
+						};
 						messages: [];
 					},
 				): Promise<void>;
@@ -902,7 +907,12 @@ describe("ENG-4509 side questions", () => {
 		).renderResyncedSession;
 
 		await renderResyncedSession.call(fakeThis, {
-			state: { isCompacting: false, isBashRunning: false, isStreaming: false },
+			state: {
+				isCompacting: false,
+				isBashRunning: false,
+				isStreaming: false,
+				sessionActions: { queuedCount: 0, steering: [], followUps: [] },
+			},
 			messages: [],
 		});
 

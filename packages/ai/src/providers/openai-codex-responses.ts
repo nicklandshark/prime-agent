@@ -45,10 +45,6 @@ import { recordStreamFailure } from "../utils/stream-failure.js";
 import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.js";
 import { buildBaseOptions } from "./simple-options.js";
 
-// ============================================================================
-// Configuration
-// ============================================================================
-
 const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const JWT_CLAIM_PATH = "https://api.openai.com/auth" as const;
 const MAX_RETRIES = 3;
@@ -64,10 +60,6 @@ const CODEX_RESPONSE_STATUSES = new Set<CodexResponseStatus>([
 	"queued",
 	"in_progress",
 ]);
-
-// ============================================================================
-// Types
-// ============================================================================
 
 export interface OpenAICodexResponsesOptions extends StreamOptions {
 	reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -530,10 +522,6 @@ export const streamSimpleOpenAICodexResponses: StreamFunction<"openai-codex-resp
 	} satisfies OpenAICodexResponsesOptions);
 };
 
-// ============================================================================
-// Request Building
-// ============================================================================
-
 function buildRequestBody(
 	model: Model<"openai-codex-responses">,
 	context: Context,
@@ -638,10 +626,6 @@ function resolveCodexWebSocketUrl(baseUrl?: string): string {
 	return url.toString();
 }
 
-// ============================================================================
-// Response Processing
-// ============================================================================
-
 async function processStream(
 	response: Response,
 	output: AssistantMessage,
@@ -723,10 +707,6 @@ function normalizeCodexStatus(status: unknown): CodexResponseStatus | undefined 
 	return CODEX_RESPONSE_STATUSES.has(status as CodexResponseStatus) ? (status as CodexResponseStatus) : undefined;
 }
 
-// ============================================================================
-// SSE Parsing
-// ============================================================================
-
 async function* parseSSE(response: Response): AsyncGenerator<Record<string, unknown>> {
 	if (!response.body) return;
 
@@ -766,23 +746,18 @@ async function* parseSSE(response: Response): AsyncGenerator<Record<string, unkn
 			}
 		}
 	} finally {
-		// Best-effort stream teardown: the reader may already be closed or errored.
 		try {
 			await reader.cancel();
 		} catch {
-			// Already closed.
+			// The reader may already be closed.
 		}
 		try {
 			reader.releaseLock();
 		} catch {
-			// Lock already released.
+			// The reader lock may already be released.
 		}
 	}
 }
-
-// ============================================================================
-// WebSocket Parsing
-// ============================================================================
 
 const OPENAI_BETA_RESPONSES_WEBSOCKETS = "responses_websockets=2026-02-06";
 const SESSION_WEBSOCKET_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -1412,10 +1387,6 @@ async function processWebSocketStream(
 		release({ keep: keepConnection });
 	}
 }
-
-// ============================================================================
-// Error Handling
-// ============================================================================
 
 async function parseErrorResponse(response: Response): Promise<{ message: string; friendlyMessage?: string }> {
 	const raw = await response.text();

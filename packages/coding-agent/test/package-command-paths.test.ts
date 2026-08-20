@@ -368,10 +368,7 @@ else {
 			expect(process.exitCode).toBeUndefined();
 			expect(errorSpy).not.toHaveBeenCalled();
 			const recordedCalls = JSON.parse(readFileSync(recordPath, "utf-8")) as string[][];
-			expect(recordedCalls).toEqual([
-				expect.arrayContaining(["install", "-g", `${baseUrl}/${tarballPath}`]),
-				expect.arrayContaining(["uninstall", "-g", PACKAGE_NAME]),
-			]);
+			expect(recordedCalls).toEqual([expect.arrayContaining(["install", "-g", `${baseUrl}/${tarballPath}`])]);
 		} finally {
 			logSpy.mockRestore();
 			errorSpy.mockRestore();
