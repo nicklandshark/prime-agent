@@ -30,6 +30,13 @@ export {
 } from "./agent-session-services.js";
 export { type BashExecutorOptions, type BashResult, executeBashWithOperations } from "./bash-executor.js";
 export type { CompactionResult } from "./compaction/index.js";
+export {
+	type ContextWindowOverrides,
+	contextWindowOverrideFor,
+	effectiveContextWindowFor,
+	ROOT_OPENAI_CODEX_CONTEXT_WINDOW,
+	rootContextWindowOverrides,
+} from "./context-window.js";
 export { createEventBus, type EventBus, type EventBusController } from "./event-bus.js";
 // Extensions system
 export {

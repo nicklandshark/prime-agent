@@ -392,6 +392,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// Only the explicit dir — the default may not match injected custom storage.
 		agentDir: options.agentDir,
 		scopedModels: options.scopedModels,
+		contextWindowOverrides: options.contextWindowOverrides,
 		resourceLoader,
 		customTools: options.customTools,
 		modelRegistry,
